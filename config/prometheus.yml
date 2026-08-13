@@ -1,0 +1,14 @@
+# 5s rather than the 15s default. Phase 5 injects chaos over a ~30s window; at
+# 15s that whole arc is two data points and the trip is invisible on the graph.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      # The compose service. Running the gateway on the host under uvicorn
+      # instead? Point this at host.docker.internal:8000 for that session - a
+      # second, permanently-down target is not committed because it would show
+      # as a scrape error on the demo dashboard.
+      - targets: ["gateway:8000"]

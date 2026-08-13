@@ -18,6 +18,29 @@ services:
       redis:
         condition: service_healthy
 
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.5.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      # Straight onto the board for the phase 5 recording, no login screen.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    depends_on:
+      - prometheus
+
   redis:
     image: redis:7-alpine
     ports:
@@ -32,3 +55,5 @@ services:
 
 volumes:
   redis-data:
+  prometheus-data:
+  grafana-data:

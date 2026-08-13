@@ -1,0 +1,11 @@
+# Provisioned in git so `docker compose up` yields a working datasource with no
+# clicking. The dashboard itself lands in phase 5, once the metrics it reads are real.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
