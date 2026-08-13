@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -153,7 +154,7 @@ async def chat_completions(
                 "x_gateway": {
                     "request_id": meta.request_id,
                     "request_class": meta.request_class,
-                    "attempts": [vars(attempt)],
+                    "attempts": [asdict(attempt)],
                 },
             },
         )
@@ -223,6 +224,6 @@ def _to_openai_response(
             feature=meta.feature,
             latency_ms=round(result.latency_ms, 1),
             cost_usd=result.cost_usd,
-            attempts=[vars(a) for a in attempts],
+            attempts=[asdict(a) for a in attempts],
         ),
     )
