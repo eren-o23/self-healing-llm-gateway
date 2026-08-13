@@ -1,0 +1,17 @@
+# the original project brief stays local
+self-healing-llm-gateway.md
+
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.DS_Store
+*.mp4
