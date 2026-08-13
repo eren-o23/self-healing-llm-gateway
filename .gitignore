@@ -1,6 +1,9 @@
 # the original project brief stays local
 self-healing-llm-gateway.md
 
+# session handoff notes - working doc, not part of the deliverable
+handoff.md
+
 .env
 .env.*
 !.env.example
