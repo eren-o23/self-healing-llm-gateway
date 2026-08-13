@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import litellm
 import pytest
 from litellm import exceptions as llm_exc
 
@@ -61,10 +62,37 @@ def test_caller_faults_never_trip_a_breaker():
     assert Outcome.AUTH.trippable
 
 
+def _usage_response(model: str, prompt: int = 1000, completion: int = 1000):
+    """Minimal stand-in for a provider response, enough for the cost table."""
+    return litellm.ModelResponse(
+        model=model,
+        choices=[{"index": 0, "message": {"role": "assistant", "content": "hi"}}],
+        usage=litellm.Usage(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+        ),
+    )
+
+
 def test_cost_of_unpriced_model_is_zero_not_an_exception():
     """ollama is genuinely free; an unpriced model must not fail a served request."""
+    assert _cost_of(_usage_response("ollama/llama3.2"), "ollama/llama3.2") == 0.0
 
-    class Unpriced:
-        model = "ollama/llama3.2"
 
-    assert _cost_of(Unpriced()) == 0.0
+def test_cost_uses_configured_model_not_the_echoed_one():
+    """Regression: groq echoes a bare model id that is absent from the price table.
+
+    Inferring the model from the response yielded $0 for a genuinely billed call.
+    Silent zero-cost removes the main reason to run a gateway at all, so the
+    configured name must win over whatever the provider echoes back.
+    """
+    configured = "groq/llama-3.3-70b-versatile"
+    echoed = "llama-3.3-70b-versatile"
+
+    assert echoed not in litellm.model_cost, "premise: the bare id is unpriced"
+
+    response = _usage_response(echoed)
+
+    assert _cost_of(response, configured) > 0.0
+    assert _cost_of(response, echoed) == 0.0, "inferring from the response is the bug"

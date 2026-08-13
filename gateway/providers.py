@@ -118,15 +118,24 @@ class ProviderCallLog:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def _cost_of(response: Any) -> float:
+def _cost_of(response: Any, model: str) -> float:
     """Cost in USD, or 0.0 when the model has no published price.
+
+    The configured model name is passed explicitly rather than letting LiteLLM
+    infer it from the response. Providers echo back their own bare model id -
+    groq returns "llama-3.3-70b-versatile", but only "groq/llama-3.3-70b-versatile"
+    is in the price table - so inference silently yields $0 for a model that is
+    genuinely billed. Silent zero-cost is the failure mode that guts the whole
+    point of a gateway, so the caller's configured name wins.
 
     Self-hosted models (ollama) are genuinely free; unknown hosted models are a
     gap in LiteLLM's table. Both must return a number rather than raising - a
     pricing gap is not a reason to fail a request that already succeeded.
     """
     try:
-        return float(litellm.completion_cost(completion_response=response) or 0.0)
+        return float(
+            litellm.completion_cost(completion_response=response, model=model) or 0.0
+        )
     except Exception:  # noqa: BLE001 - any pricing failure degrades to zero
         return 0.0
 
@@ -169,6 +178,6 @@ async def call_provider(
         latency_ms=(time.perf_counter() - started) * 1000,
         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-        cost_usd=_cost_of(response),
+        cost_usd=_cost_of(response, provider.model),
         response=response,
     )
