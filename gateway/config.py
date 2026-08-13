@@ -8,11 +8,17 @@ from functools import lru_cache
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, model_validator
 
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "gateway.yaml"
+
+# Load .env once, at import, so every entrypoint sees provider keys: uvicorn,
+# pytest, and the phase 4 worker alike. Real environment variables win, which
+# keeps docker compose (which injects them directly) behaving identically.
+load_dotenv(override=False)
 
 
 class ProviderConfig(BaseModel):
