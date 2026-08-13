@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import httpx
 import pytest
 from litellm import exceptions as llm_exc
@@ -20,7 +18,7 @@ _ARGS = {"message": "boom", "llm_provider": "openai", "model": "gpt-4o-mini"}
         (llm_exc.RateLimitError(**_ARGS), Outcome.RATE_LIMIT),
         (llm_exc.Timeout(**_ARGS), Outcome.TIMEOUT),
         (llm_exc.APIConnectionError(**_ARGS), Outcome.TIMEOUT),
-        (asyncio.TimeoutError(), Outcome.TIMEOUT),
+        (TimeoutError(), Outcome.TIMEOUT),
         (llm_exc.AuthenticationError(**_ARGS), Outcome.AUTH),
         (llm_exc.PermissionDeniedError(**_ARGS, response=_RESPONSE), Outcome.AUTH),
         (llm_exc.ContentPolicyViolationError(**_ARGS), Outcome.CONTENT_FILTER),

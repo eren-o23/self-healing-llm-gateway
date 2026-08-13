@@ -7,7 +7,6 @@ healing is what this project exists to build.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -82,7 +81,7 @@ def classify_exception(exc: BaseException) -> Outcome:
     Unknown exceptions become SERVER_ERROR: a failure we cannot explain is still
     a failure, and treating it as harmless would hide a genuinely sick provider.
     """
-    if isinstance(exc, asyncio.TimeoutError):
+    if isinstance(exc, TimeoutError):
         return Outcome.TIMEOUT
     for exc_type, outcome in _EXCEPTION_TAXONOMY:
         if isinstance(exc, exc_type):
