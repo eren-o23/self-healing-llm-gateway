@@ -11,8 +11,10 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 
-from gateway.config import GatewayConfig, get_config
+from gateway import health
+from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.providers import Outcome, ProviderCallLog, ProviderResult, call_provider
 from gateway.schemas import (
     ChatCompletionRequest,
@@ -108,6 +110,7 @@ async def chat_completions(
     request: ChatCompletionRequest,
     meta: Annotated[RequestMetadata, Depends(require_metadata)],
     config: Annotated[GatewayConfig, Depends(get_config)],
+    r: Annotated[Redis, Depends(get_redis)],
     provider: Annotated[
         str | None, Query(description="Pin a provider, bypassing the ladder")
     ] = None,
@@ -122,6 +125,8 @@ async def chat_completions(
     # circuit breaking and hedging land in phase 3 as gateway/router.py.
     chosen = ladder[0]
     result = await call_provider(chosen, config.providers[chosen], payload)
+
+    await _observe(r, result)
 
     attempt = ProviderCallLog(
         provider=result.provider,
@@ -160,6 +165,25 @@ async def chat_completions(
         )
 
     return _to_openai_response(result, meta, [attempt])
+
+
+async def _observe(r: Redis, result: ProviderResult) -> None:
+    """Record the call, without ever letting that failure reach the caller.
+
+    A monitoring write must not fail a completion the caller has already been
+    billed for, so Redis being down costs observability rather than availability.
+
+    The consequence is worth naming because it is phase 3's failure mode: no
+    Redis means an empty window, which reads as healthy, which means nothing
+    trips. That is fail-open, and for a gateway it is the right direction to
+    fail - a broken breaker should not take every provider offline at once.
+    """
+    try:
+        await health.record(r, result.provider, result.outcome, result.latency_ms)
+    except Exception:  # noqa: BLE001 - degraded observability beats a failed request
+        log.warning(
+            "health record failed for %s; its window will read thin", result.provider
+        )
 
 
 def _resolve_ladder(

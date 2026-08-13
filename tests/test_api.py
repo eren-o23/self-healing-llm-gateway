@@ -204,6 +204,53 @@ def test_provider_exception_never_escapes_as_a_500(client, monkeypatch):
     assert response.status_code == 429
 
 
+async def test_served_requests_land_in_the_health_window(client, stub_provider, fake_redis):
+    stub_provider(_ok_result())
+
+    client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+
+    from gateway.health import snapshot
+
+    snap = await snapshot(fake_redis, "anthropic")
+    assert snap.samples == 1
+    assert snap.successes == 1
+
+
+async def test_failed_calls_are_recorded_too(client, stub_provider, fake_redis):
+    """A breaker fed only successes would never trip."""
+    stub_provider(
+        ProviderResult(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            outcome=Outcome.SERVER_ERROR,
+            latency_ms=5.0,
+            error="upstream said no",
+        )
+    )
+
+    client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+
+    from gateway.health import snapshot
+
+    snap = await snapshot(fake_redis, "anthropic")
+    assert snap.trippable_errors == 1
+
+
+def test_unreachable_redis_does_not_fail_the_request(client, stub_provider, monkeypatch):
+    """Observability is allowed to degrade; a paid-for completion is not."""
+    stub_provider(_ok_result())
+
+    async def boom(*_args, **_kwargs):
+        raise ConnectionError("redis is gone")
+
+    monkeypatch.setattr("gateway.main.health.record", boom)
+
+    response = client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "hi there"
+
+
 def test_streaming_is_refused_rather_than_half_supported(client):
     response = client.post(
         "/v1/chat/completions", json={**BODY, "stream": True}, headers=HEADERS

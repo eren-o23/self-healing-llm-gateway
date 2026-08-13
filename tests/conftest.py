@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 import yaml
+from fakeredis.aioredis import FakeRedis
 from fastapi.testclient import TestClient
 
-from gateway.config import get_config, load_config
+from gateway.config import get_config, get_redis, load_config
 
 TEST_CONFIG = {
     "providers": {
@@ -51,14 +52,26 @@ def all_keys_set(monkeypatch):
 
 
 @pytest.fixture
-def client(config_path, monkeypatch, all_keys_set):
-    """App wired to the test config, with get_config's cache cleared either side."""
+def fake_redis():
+    return FakeRedis(decode_responses=True)
+
+
+@pytest.fixture
+def client(config_path, monkeypatch, all_keys_set, fake_redis):
+    """App wired to the test config and a fake Redis, caches cleared either side.
+
+    The Redis override is not a nicety: every request now records health, so
+    without it each of these tests would sit through a TCP connect to a Redis
+    that is not running before the failure is swallowed.
+    """
     from gateway.main import app
 
     monkeypatch.setenv("GATEWAY_CONFIG", str(config_path))
     get_config.cache_clear()
+    app.dependency_overrides[get_redis] = lambda: fake_redis
     with TestClient(app) as test_client:
         yield test_client
+    app.dependency_overrides.clear()
     get_config.cache_clear()
 
 
