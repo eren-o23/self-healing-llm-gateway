@@ -43,3 +43,8 @@ classes:
     deferrable: true
 
 default_class: interactive.chat
+
+# The sliding window each provider's success rate and percentiles are computed over.
+# Shorter means the phase 3 breaker reacts faster on thinner evidence.
+health:
+  window_s: 60

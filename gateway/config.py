@@ -7,6 +7,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+import redis.asyncio as aioredis
 import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, model_validator
@@ -54,10 +55,21 @@ class ClassConfig(BaseModel):
     hedge_after_ms: int | None = None
 
 
+class HealthConfig(BaseModel):
+    """The sliding window every provider's health is judged over.
+
+    Shortening this makes the breaker react faster and trip on thinner evidence.
+    It is the first knob to turn if failover reads as sluggish on camera.
+    """
+
+    window_s: int = 60
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig]
     classes: dict[str, ClassConfig]
     default_class: str
+    health: HealthConfig = HealthConfig()
 
     @model_validator(mode="after")
     def _check_references(self) -> GatewayConfig:
@@ -105,3 +117,20 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
 @lru_cache(maxsize=1)
 def get_config() -> GatewayConfig:
     return load_config()
+
+
+@lru_cache(maxsize=1)
+def get_redis() -> aioredis.Redis:
+    """The shared Redis handle: health windows now, breaker and queue later.
+
+    Sync and cached rather than async: lru_cache on an async function would cache
+    the coroutine object, which can only be awaited once. Handlers take this as a
+    FastAPI dependency so tests can override it; the phase 4 worker calls it
+    directly, with no FastAPI in sight.
+
+    decode_responses=True so sorted-set members come back as str rather than
+    needing a .decode() at every parse site.
+    """
+    return aioredis.from_url(
+        os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
+    )

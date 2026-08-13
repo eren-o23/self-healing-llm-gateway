@@ -4,6 +4,9 @@ self-healing-llm-gateway.md
 # session handoff notes - working doc, not part of the deliverable
 handoff.md
 
+# build spec and per-phase notes - kept alongside the code, but not published
+specs/
+
 .env
 .env.*
 !.env.example
