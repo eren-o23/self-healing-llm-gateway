@@ -184,6 +184,21 @@ async def test_window_survives_a_restart(redis):
     assert snap.errors_by_type == {"timeout": 1}
 
 
+def test_admin_health_reports_every_configured_provider(client, stub_provider):
+    from tests.conftest import BODY, HEADERS, ok_result
+
+    stub_provider(ok_result())
+    client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+
+    body = client.get("/admin/health").json()
+
+    assert set(body) == {"anthropic", "openai", "groq", "ollama"}
+    assert body["anthropic"]["samples"] == 1
+    assert body["anthropic"]["p95_ms"] == 123.4
+    assert body["groq"]["samples"] == 0, "a provider with no traffic reads as healthy"
+    assert body["groq"]["success_rate"] == 1.0
+
+
 async def test_providers_do_not_share_a_window(redis):
     await _fill(redis, "anthropic", outcomes=[Outcome.SERVER_ERROR] * 3)
     await _fill(redis, "groq", outcomes=[Outcome.OK])

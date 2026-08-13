@@ -94,6 +94,22 @@ async def healthz(config: Annotated[GatewayConfig, Depends(get_config)]) -> dict
     }
 
 
+@app.get("/admin/health")
+async def admin_health(
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    r: Annotated[Redis, Depends(get_redis)],
+) -> dict[str, Any]:
+    """Per-provider window as the phase 3 breaker will read it.
+
+    Unguarded on purpose this phase - it is read-only. The shared-secret admin
+    guard arrives alongside chaos.py, which is a remote fault-injection API and
+    the thing that actually needs one.
+    """
+    return {
+        name: asdict(await health.snapshot(r, name)) for name in config.providers
+    }
+
+
 @app.get("/metrics")
 async def prometheus_metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
