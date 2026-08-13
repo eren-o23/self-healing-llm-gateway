@@ -10,10 +10,11 @@ from dataclasses import asdict
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from gateway import health
+from gateway import health, metrics
 from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.providers import Outcome, ProviderCallLog, ProviderResult, call_provider
 from gateway.schemas import (
@@ -93,6 +94,11 @@ async def healthz(config: Annotated[GatewayConfig, Depends(get_config)]) -> dict
     }
 
 
+@app.get("/metrics")
+async def prometheus_metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/v1/models")
 async def list_models(config: Annotated[GatewayConfig, Depends(get_config)]) -> dict[str, Any]:
     return {
@@ -126,7 +132,7 @@ async def chat_completions(
     chosen = ladder[0]
     result = await call_provider(chosen, config.providers[chosen], payload)
 
-    await _observe(r, result)
+    await _observe(r, result, meta)
 
     attempt = ProviderCallLog(
         provider=result.provider,
@@ -167,17 +173,22 @@ async def chat_completions(
     return _to_openai_response(result, meta, [attempt])
 
 
-async def _observe(r: Redis, result: ProviderResult) -> None:
-    """Record the call, without ever letting that failure reach the caller.
+async def _observe(r: Redis, result: ProviderResult, meta: RequestMetadata) -> None:
+    """Record the call to both stores, without letting either failure reach the caller.
 
-    A monitoring write must not fail a completion the caller has already been
-    billed for, so Redis being down costs observability rather than availability.
+    Prometheus first and outside the guard: it is in-process and cannot really
+    fail, so it keeps its data even when Redis is unreachable.
+
+    The Redis write is guarded because a monitoring write must not fail a
+    completion the caller has already been billed for - Redis being down should
+    cost observability, not availability.
 
     The consequence is worth naming because it is phase 3's failure mode: no
     Redis means an empty window, which reads as healthy, which means nothing
     trips. That is fail-open, and for a gateway it is the right direction to
     fail - a broken breaker should not take every provider offline at once.
     """
+    metrics.observe(result, meta)
     try:
         await health.record(r, result.provider, result.outcome, result.latency_ms)
     except Exception:  # noqa: BLE001 - degraded observability beats a failed request

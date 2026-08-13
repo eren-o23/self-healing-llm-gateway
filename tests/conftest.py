@@ -6,6 +6,7 @@ from fakeredis.aioredis import FakeRedis
 from fastapi.testclient import TestClient
 
 from gateway.config import get_config, get_redis, load_config
+from gateway.providers import Outcome, ProviderResult
 
 TEST_CONFIG = {
     "providers": {
@@ -82,3 +83,56 @@ HEADERS = {
 }
 
 BODY = {"messages": [{"role": "user", "content": "hello"}]}
+
+
+class _Message:
+    role = "assistant"
+    content = "hi there"
+
+
+class _Choice:
+    index = 0
+    message = _Message()
+    finish_reason = "stop"
+
+
+class _Usage:
+    prompt_tokens = 11
+    completion_tokens = 3
+
+
+class _ModelResponse:
+    id = "chatcmpl-abc"
+    created = 1_700_000_000
+    model = "gpt-4o-mini"
+    choices = [_Choice()]
+    usage = _Usage()
+
+
+def ok_result(provider: str = "anthropic") -> ProviderResult:
+    return ProviderResult(
+        provider=provider,
+        model="claude-sonnet-5",
+        outcome=Outcome.OK,
+        latency_ms=123.4,
+        prompt_tokens=11,
+        completion_tokens=3,
+        cost_usd=0.000123,
+        response=_ModelResponse(),
+    )
+
+
+@pytest.fixture
+def stub_provider(monkeypatch):
+    """Replace the provider call; these tests are about the gateway, not the network."""
+    calls: list[str] = []
+
+    def _install(result: ProviderResult):
+        async def fake_call(name, provider, payload):
+            calls.append(name)
+            return result
+
+        monkeypatch.setattr("gateway.main.call_provider", fake_call)
+        return calls
+
+    return _install

@@ -6,60 +6,7 @@ import pytest
 from litellm import exceptions as llm_exc
 
 from gateway.providers import Outcome, ProviderResult
-from tests.conftest import BODY, HEADERS
-
-
-class _Message:
-    role = "assistant"
-    content = "hi there"
-
-
-class _Choice:
-    index = 0
-    message = _Message()
-    finish_reason = "stop"
-
-
-class _Usage:
-    prompt_tokens = 11
-    completion_tokens = 3
-
-
-class _ModelResponse:
-    id = "chatcmpl-abc"
-    created = 1_700_000_000
-    model = "gpt-4o-mini"
-    choices = [_Choice()]
-    usage = _Usage()
-
-
-def _ok_result(provider: str = "anthropic") -> ProviderResult:
-    return ProviderResult(
-        provider=provider,
-        model="claude-sonnet-5",
-        outcome=Outcome.OK,
-        latency_ms=123.4,
-        prompt_tokens=11,
-        completion_tokens=3,
-        cost_usd=0.000123,
-        response=_ModelResponse(),
-    )
-
-
-@pytest.fixture
-def stub_provider(monkeypatch):
-    """Replace the provider call; these tests are about the boundary, not the network."""
-    calls: list[str] = []
-
-    def _install(result: ProviderResult):
-        async def fake_call(name, provider, payload):
-            calls.append(name)
-            return result
-
-        monkeypatch.setattr("gateway.main.call_provider", fake_call)
-        return calls
-
-    return _install
+from tests.conftest import BODY, HEADERS, ok_result
 
 
 def test_healthz_reports_provider_and_ladder_state(client):
@@ -75,7 +22,7 @@ def test_models_lists_available_providers(client):
 
 
 def test_returns_openai_shaped_response(client, stub_provider):
-    stub_provider(_ok_result())
+    stub_provider(ok_result())
 
     body = client.post("/v1/chat/completions", json=BODY, headers=HEADERS).json()
 
@@ -90,7 +37,7 @@ def test_returns_openai_shaped_response(client, stub_provider):
 
 
 def test_response_carries_attribution(client, stub_provider):
-    stub_provider(_ok_result())
+    stub_provider(ok_result())
 
     meta = client.post("/v1/chat/completions", json=BODY, headers=HEADERS).json()["x_gateway"]
 
@@ -119,7 +66,7 @@ def test_empty_metadata_is_rejected(client):
 
 
 def test_class_selects_the_ladder(client, stub_provider):
-    calls = stub_provider(_ok_result("groq"))
+    calls = stub_provider(ok_result("groq"))
 
     client.post(
         "/v1/chat/completions",
@@ -141,7 +88,7 @@ def test_unknown_class_is_rejected(client):
 
 
 def test_provider_override_pins_the_backend(client, stub_provider):
-    calls = stub_provider(_ok_result("ollama"))
+    calls = stub_provider(ok_result("ollama"))
 
     client.post("/v1/chat/completions?provider=ollama", json=BODY, headers=HEADERS)
 
@@ -205,7 +152,7 @@ def test_provider_exception_never_escapes_as_a_500(client, monkeypatch):
 
 
 async def test_served_requests_land_in_the_health_window(client, stub_provider, fake_redis):
-    stub_provider(_ok_result())
+    stub_provider(ok_result())
 
     client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
 
@@ -238,7 +185,7 @@ async def test_failed_calls_are_recorded_too(client, stub_provider, fake_redis):
 
 def test_unreachable_redis_does_not_fail_the_request(client, stub_provider, monkeypatch):
     """Observability is allowed to degrade; a paid-for completion is not."""
-    stub_provider(_ok_result())
+    stub_provider(ok_result())
 
     async def boom(*_args, **_kwargs):
         raise ConnectionError("redis is gone")
