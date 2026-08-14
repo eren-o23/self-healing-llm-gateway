@@ -11,6 +11,7 @@ try/except around every rung.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -63,8 +64,19 @@ async def route(
 ) -> RouteOutcome:
     """Walk the ladder until something answers."""
     attempts: list[ProviderCallLog] = []
+    hedge_after_ms = config.classes[meta.request_class].hedge_after_ms
+    start = 0
 
-    for i, provider in enumerate(ladder):
+    if hedge_after_ms:
+        routed, start = await _hedged_start(
+            r, config, meta, payload, ladder, hedge_after_ms
+        )
+        attempts.extend(routed.attempts)
+        if routed.result is not None:
+            return RouteOutcome(routed.result, attempts)
+
+    for i in range(start, len(ladder)):
+        provider = ladder[i]
         admit, reason = await breaker.allows(r, provider)
         if not admit:
             attempts.append(_skipped(provider, reason))
@@ -79,6 +91,129 @@ async def route(
         _count_failover(provider, ladder, i, meta, result)
 
     return RouteOutcome(None, attempts)
+
+
+async def _hedged_start(
+    r: Redis,
+    config: GatewayConfig,
+    meta: RequestMetadata,
+    payload: dict,
+    ladder: list[str],
+    hedge_after_ms: int,
+) -> tuple[RouteOutcome, int]:
+    """Race the first two admissible rungs, and report where the plain walk resumes.
+
+    A latency-sensitive class would rather pay for a second call than wait out a
+    slow tail. The budget is what keeps that honest: the hedge only fires for
+    calls that have already missed it, so a provider behaving normally costs
+    nothing extra.
+
+    Returns (outcome, resume_index). A result means the race settled it; None
+    means both rungs failed in a way worth walking on from, and resume_index is
+    the rung after the hedge.
+
+    # ponytail: hedges exactly one extra rung, never a fan-out across the ladder
+    """
+    admitted = await _admissible(r, ladder, limit=2)
+    if len(admitted) < 2:
+        return RouteOutcome(None, []), 0  # nothing to race; the plain walk handles it
+
+    (first_i, first), (second_i, second) = admitted
+    request_class = meta.request_class
+    attempts: list[ProviderCallLog] = []
+
+    primary = asyncio.create_task(attempt(r, config, meta, payload, first))
+    done, _ = await asyncio.wait({primary}, timeout=hedge_after_ms / 1000)
+    if done:
+        result = primary.result()
+        attempts.append(_logged(result))
+        if _is_final(result):
+            return RouteOutcome(result, attempts), 0
+        _count_failover(first, ladder, first_i, meta, result)
+        return RouteOutcome(None, attempts), first_i + 1
+
+    metrics.HEDGE.labels(outcome="fired", **{"class": request_class}).inc()
+    log.info(
+        "hedge fired request_id=%s %s did not answer in %dms; adding %s",
+        meta.request_id,
+        first,
+        hedge_after_ms,
+        second,
+    )
+    hedge = asyncio.create_task(attempt(r, config, meta, payload, second))
+
+    winner, loser = await _first_usable(primary, hedge)
+    result = winner.result()
+    served = _is_final(result)
+
+    # "Won" means the extra call actually produced the answer. A hedge that came
+    # back first with a failure did not win anything, so it counts as wasted -
+    # which is the honest way to price hedging.
+    metrics.HEDGE.labels(
+        outcome="won_by_hedge" if (winner is hedge and served) else "wasted",
+        **{"class": request_class},
+    ).inc()
+
+    # Both calls are real and billed, and attempt() has already recorded each to
+    # health, Prometheus and the breaker. Only the trail order is decided here:
+    # the winner first, because that is the one that served.
+    attempts.append(_logged(result))
+    if loser.done() and not loser.cancelled():
+        attempts.append(_logged(loser.result()))
+
+    if served:
+        return RouteOutcome(result, attempts), 0
+    _count_failover(result.provider, ladder, second_i, meta, result)
+    return RouteOutcome(None, attempts), second_i + 1
+
+
+async def _first_usable(
+    primary: asyncio.Task, hedge: asyncio.Task
+) -> tuple[asyncio.Task, asyncio.Task]:
+    """The first task to return something worth having, and the one that lost.
+
+    Whoever finishes first usually wins - but not if it finished by failing. In
+    that case the other task is still this request's best chance, so it is
+    awaited rather than thrown away.
+
+    The loser is cancelled *and awaited*. An un-awaited cancelled task keeps
+    running, and a provider mid-generation goes on billing for tokens it has
+    already produced - the exact cost the hedge budget exists to bound.
+    """
+    done, pending = await asyncio.wait(
+        {primary, hedge}, return_when=asyncio.FIRST_COMPLETED
+    )
+
+    if not pending:  # both landed in the same tick
+        return (
+            (primary, hedge) if _is_final(primary.result()) else (hedge, primary)
+        )
+
+    first, other = done.pop(), pending.pop()
+    if _is_final(first.result()):
+        other.cancel()
+        await asyncio.gather(other, return_exceptions=True)
+        return first, other
+
+    await asyncio.wait({other})
+    return (other, first) if _is_final(other.result()) else (first, other)
+
+
+async def _admissible(
+    r: Redis, ladder: list[str], *, limit: int
+) -> list[tuple[int, str]]:
+    """The first `limit` rungs whose circuits will take traffic, with their positions.
+
+    Checked before racing so a hedge never spends its second call on a provider
+    the breaker has already taken out.
+    """
+    admitted: list[tuple[int, str]] = []
+    for i, provider in enumerate(ladder):
+        if (await breaker.allows(r, provider))[0]:
+            admitted.append((i, provider))
+            if len(admitted) == limit:
+                break
+    return admitted
 
 
 async def attempt(

@@ -36,7 +36,9 @@ TEST_CONFIG = {
         "interactive.chat": {"ladder": ["anthropic", "openai", "groq", "ollama"]},
         "interactive.classify": {
             "ladder": ["groq", "anthropic", "ollama"],
-            "hedge_after_ms": 400,
+            # Shorter than the shipped 400ms: test_hedge.py waits the budget out
+            # for real rather than faking a clock.
+            "hedge_after_ms": 100,
         },
         "batch.generate": {
             "ladder": ["anthropic", "openai", "groq", "ollama"],
