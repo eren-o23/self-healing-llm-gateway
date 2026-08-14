@@ -97,7 +97,12 @@ def use_test_config(config_path, monkeypatch):
 
 
 @pytest.fixture
-def client(monkeypatch, use_test_config, all_keys_set, fake_redis):
+def admin_secret(monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "test-admin-secret")
+
+
+@pytest.fixture
+def client(monkeypatch, use_test_config, all_keys_set, admin_secret, fake_redis):
     """App wired to the test config and a fake Redis.
 
     The Redis override is not a nicety: every request now records health, so
@@ -117,6 +122,8 @@ HEADERS = {
     "X-Feature": "support-bot",
     "X-Request-Id": "req-1",
 }
+
+ADMIN_HEADERS = {"X-Admin-Secret": "test-admin-secret"}
 
 BODY = {"messages": [{"role": "user", "content": "hello"}]}
 

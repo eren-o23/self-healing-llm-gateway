@@ -6,7 +6,7 @@ import pytest
 from litellm import exceptions as llm_exc
 
 from gateway.providers import Outcome, ProviderResult
-from tests.conftest import BODY, HEADERS, ok_result
+from tests.conftest import ADMIN_HEADERS, BODY, HEADERS, ok_result
 
 
 def test_healthz_reports_provider_and_ladder_state(client):
@@ -224,3 +224,60 @@ def test_pinning_a_disabled_provider_is_503(client, monkeypatch):
     response = client.post("/v1/chat/completions?provider=groq", json=BODY, headers=HEADERS)
 
     assert response.status_code == 503
+
+
+def test_admin_routes_reject_a_missing_secret(client):
+    """The chaos API can break any provider from anywhere that reaches the port."""
+    assert client.get("/admin/circuits").status_code == 403
+    assert client.get("/admin/health").status_code == 403
+    assert client.post("/admin/chaos", json={"provider": "groq"}).status_code == 403
+
+
+def test_admin_routes_reject_a_wrong_secret(client):
+    response = client.get("/admin/circuits", headers={"X-Admin-Secret": "nope"})
+
+    assert response.status_code == 403
+
+
+def test_admin_routes_fail_closed_when_no_secret_is_configured(client, monkeypatch):
+    """A config gap must disable the router, never open it."""
+    monkeypatch.delenv("ADMIN_SECRET", raising=False)
+
+    response = client.get("/admin/circuits", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 503
+
+
+def test_chaos_round_trips_through_the_admin_api(client):
+    set_response = client.post(
+        "/admin/chaos",
+        json={"provider": "groq", "error_rate": 1.0, "error_type": "rate_limit", "ttl_s": 30},
+        headers=ADMIN_HEADERS,
+    )
+    assert set_response.status_code == 200
+
+    listed = client.get("/admin/chaos", headers=ADMIN_HEADERS).json()
+    assert listed["groq"]["error_rate"] == 1.0
+    assert listed["groq"]["error_type"] == "rate_limit"
+
+    client.delete("/admin/chaos/groq", headers=ADMIN_HEADERS)
+
+    assert client.get("/admin/chaos", headers=ADMIN_HEADERS).json() == {}
+
+
+def test_chaos_rejects_an_unknown_error_type(client):
+    """Only outcomes the taxonomy actually classifies can be injected."""
+    response = client.post(
+        "/admin/chaos",
+        json={"provider": "groq", "error_type": "ok"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 400
+
+
+def test_admin_circuits_reports_every_provider(client):
+    body = client.get("/admin/circuits", headers=ADMIN_HEADERS).json()
+
+    assert set(body) == {"anthropic", "openai", "groq", "ollama"}
+    assert body["anthropic"]["state"] == "closed"

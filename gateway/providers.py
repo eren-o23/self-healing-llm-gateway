@@ -144,8 +144,19 @@ async def call_provider(
     name: str,
     provider: ProviderConfig,
     payload: dict[str, Any],
+    chaos: Any | None = None,
 ) -> ProviderResult:
-    """Dispatch one request to one provider. Never raises for provider failures."""
+    """Dispatch one request to one provider. Never raises for provider failures.
+
+    An injected fault (chaos.ChaosSpec) is applied inside the same try and inside
+    the same timing span as the real call, so it is indistinguishable downstream
+    from a genuine one: same classification, same latency accounting, same health
+    window. The alternative - synthesising a failed ProviderResult somewhere up
+    the stack - would demo a code path that real traffic never takes.
+
+    Typed as Any to keep this module free of a Redis-aware import; the router
+    fetches the spec and hands it down.
+    """
     started = time.perf_counter()
 
     kwargs: dict[str, Any] = {
@@ -159,6 +170,8 @@ async def call_provider(
         kwargs["api_base"] = provider.api_base
 
     try:
+        if chaos is not None:
+            await chaos.apply()
         response = await litellm.acompletion(**kwargs)
     except Exception as exc:  # noqa: BLE001 - classified, not swallowed
         outcome = classify_exception(exc)

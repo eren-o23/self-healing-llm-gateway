@@ -185,12 +185,12 @@ async def test_window_survives_a_restart(redis):
 
 
 def test_admin_health_reports_every_configured_provider(client, stub_provider):
-    from tests.conftest import BODY, HEADERS, ok_result
+    from tests.conftest import ADMIN_HEADERS, BODY, HEADERS, ok_result
 
     stub_provider(ok_result())
     client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
 
-    body = client.get("/admin/health").json()
+    body = client.get("/admin/health", headers=ADMIN_HEADERS).json()
 
     assert set(body) == {"anthropic", "openai", "groq", "ollama"}
     assert body["anthropic"]["samples"] == 1

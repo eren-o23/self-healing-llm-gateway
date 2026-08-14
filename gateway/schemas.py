@@ -78,3 +78,18 @@ class RequestMetadata(BaseModel):
     feature: str
     request_id: str
     request_class: str
+
+
+class ChaosRequest(BaseModel):
+    """Break a provider on purpose.
+
+    ttl_s is required to be finite and is capped: injected faults must expire on
+    their own, because the failure mode of a fault-injection API is somebody
+    walking away from a broken provider and no longer remembering they broke it.
+    """
+
+    provider: str
+    error_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    latency_ms: int = Field(default=0, ge=0, le=120_000)
+    error_type: str = "server_error"
+    ttl_s: int = Field(default=120, gt=0, le=3600)

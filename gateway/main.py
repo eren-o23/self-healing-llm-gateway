@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from gateway import health, metrics
+from gateway import breaker, chaos, health, metrics
 from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.providers import Outcome, ProviderCallLog, ProviderResult, call_provider
 from gateway.schemas import (
+    ChaosRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
@@ -94,20 +97,99 @@ async def healthz(config: Annotated[GatewayConfig, Depends(get_config)]) -> dict
     }
 
 
-@app.get("/admin/health")
+def require_admin(x_admin_secret: Annotated[str | None, Header()] = None) -> None:
+    """Shared secret on every /admin route, local compose or not.
+
+    This router can break any provider on demand from anywhere that can reach the
+    port. "It only runs in compose" is how an unauthenticated fault-injection API
+    ends up somewhere it shouldn't be, so it is guarded from the first commit
+    that introduces it.
+
+    An unset ADMIN_SECRET disables the router rather than opening it. Failing
+    closed on a missing secret is the whole point; a config gap must never be the
+    thing that grants access.
+    """
+    expected = os.getenv("ADMIN_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="admin API is disabled: ADMIN_SECRET is unset",
+        )
+    if not x_admin_secret or not secrets.compare_digest(x_admin_secret, expected):
+        raise HTTPException(status_code=403, detail="bad or missing X-Admin-Secret")
+
+
+admin = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
+
+
+@admin.get("/health")
 async def admin_health(
     config: Annotated[GatewayConfig, Depends(get_config)],
     r: Annotated[Redis, Depends(get_redis)],
 ) -> dict[str, Any]:
-    """Per-provider window as the phase 3 breaker will read it.
+    """Per-provider window, exactly as the breaker reads it."""
+    return {name: asdict(await health.snapshot(r, name)) for name in config.providers}
 
-    Unguarded on purpose this phase - it is read-only. The shared-secret admin
-    guard arrives alongside chaos.py, which is a remote fault-injection API and
-    the thing that actually needs one.
-    """
+
+@admin.get("/circuits")
+async def admin_circuits(
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    r: Annotated[Redis, Depends(get_redis)],
+) -> dict[str, Any]:
+    """Every circuit's state. The first thing to look at when routing surprises you."""
     return {
-        name: asdict(await health.snapshot(r, name)) for name in config.providers
+        name: asdict(await breaker.state_of(r, name)) for name in config.providers
     }
+
+
+@admin.get("/chaos")
+async def admin_chaos_list(
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    r: Annotated[Redis, Depends(get_redis)],
+) -> dict[str, Any]:
+    return {
+        name: asdict(spec)
+        for name, spec in (await chaos.active(r, list(config.providers))).items()
+    }
+
+
+@admin.post("/chaos")
+async def admin_chaos_set(
+    request: ChaosRequest,
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    r: Annotated[Redis, Depends(get_redis)],
+) -> dict[str, Any]:
+    if request.provider not in config.providers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown provider {request.provider!r}; "
+            f"known: {sorted(config.providers)}",
+        )
+    if request.error_type not in chaos.INJECTABLE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"error_type must be one of {sorted(chaos.INJECTABLE)}",
+        )
+
+    spec = chaos.ChaosSpec(
+        provider=request.provider,
+        error_rate=request.error_rate,
+        latency_ms=request.latency_ms,
+        error_type=request.error_type,
+    )
+    await chaos.set_(r, spec, request.ttl_s)
+    return {"chaos": asdict(spec), "expires_in_s": request.ttl_s}
+
+
+@admin.delete("/chaos/{provider}")
+async def admin_chaos_clear(
+    provider: str,
+    r: Annotated[Redis, Depends(get_redis)],
+) -> dict[str, Any]:
+    return {"provider": provider, "cleared": await chaos.clear(r, provider)}
+
+
+app.include_router(admin)
 
 
 @app.get("/metrics")

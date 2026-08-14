@@ -7,7 +7,9 @@ import litellm
 import pytest
 from litellm import exceptions as llm_exc
 
-from gateway.providers import Outcome, _cost_of, classify_exception
+from gateway import chaos
+from gateway.config import ProviderConfig
+from gateway.providers import Outcome, _cost_of, call_provider, classify_exception
 
 _RESPONSE = httpx.Response(403, request=httpx.Request("POST", "http://provider.test"))
 _ARGS = {"message": "boom", "llm_provider": "openai", "model": "gpt-4o-mini"}
@@ -96,3 +98,45 @@ def test_cost_uses_configured_model_not_the_echoed_one():
 
     assert _cost_of(response, configured) > 0.0
     assert _cost_of(response, echoed) == 0.0, "inferring from the response is the bug"
+
+
+@pytest.mark.parametrize("error_type", sorted(chaos.INJECTABLE))
+async def test_injected_faults_travel_the_real_classification_path(error_type):
+    """Chaos must be indistinguishable from a genuine failure downstream.
+
+    The injected exception is a real LiteLLM type raised at the real dispatch
+    point, so classify_exception maps it exactly as it would the provider's own -
+    which is what makes a chaos-driven demo evidence that failover works, rather
+    than evidence that a mock works.
+    """
+    spec = chaos.ChaosSpec(provider="groq", error_rate=1.0, error_type=error_type)
+
+    result = await call_provider(
+        "groq", ProviderConfig(model="groq/llama-3.3-70b-versatile"), {}, chaos=spec
+    )
+
+    assert result.outcome == error_type
+    assert "injected" in result.error
+
+
+async def test_injected_latency_lands_inside_the_measured_span():
+    """Slow and broken are different symptoms; the p95 trip path needs the first.
+
+    Latency is applied unconditionally and before the error roll, so a spec can
+    make a provider slow without making it fail - and the delay is inside
+    call_provider's own timer, which is what the health window records.
+    """
+    spec = chaos.ChaosSpec(
+        provider="groq", error_rate=1.0, latency_ms=50, error_type="timeout"
+    )
+
+    result = await call_provider(
+        "groq", ProviderConfig(model="groq/llama-3.3-70b-versatile"), {}, chaos=spec
+    )
+
+    assert result.outcome == Outcome.TIMEOUT
+    assert result.latency_ms >= 50
+
+
+async def test_latency_only_chaos_does_not_raise():
+    await chaos.ChaosSpec(provider="groq", error_rate=0.0, latency_ms=1).apply()
