@@ -114,6 +114,11 @@ def test_unknown_provider_override_is_rejected(client):
     ids=lambda v: str(v),
 )
 def test_provider_failures_map_to_http_status(client, stub_provider, outcome, status):
+    """Pinned to one rung: this is about the status mapping, not the ladder walk.
+
+    Left unpinned, a trippable outcome now walks every provider and exhausts into
+    a 503 - which is the point of phase 3, and is covered in test_router.py.
+    """
     stub_provider(
         ProviderResult(
             provider="anthropic",
@@ -124,7 +129,9 @@ def test_provider_failures_map_to_http_status(client, stub_provider, outcome, st
         )
     )
 
-    response = client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+    response = client.post(
+        "/v1/chat/completions?provider=anthropic", json=BODY, headers=HEADERS
+    )
 
     assert response.status_code == status
     assert response.json()["error"]["type"] == str(outcome)
@@ -133,7 +140,7 @@ def test_provider_failures_map_to_http_status(client, stub_provider, outcome, st
 def test_provider_exception_never_escapes_as_a_500(client, monkeypatch):
     """call_provider classifies rather than raises, so a sick provider is a 429, not a crash."""
 
-    async def raising_call(name, provider, payload):
+    async def raising_call(name, provider, payload, chaos=None):
         from gateway.providers import call_provider as real
 
         async def boom(**_):
@@ -144,9 +151,11 @@ def test_provider_exception_never_escapes_as_a_500(client, monkeypatch):
         monkeypatch.setattr("litellm.acompletion", boom)
         return await real(name, provider, payload)
 
-    monkeypatch.setattr("gateway.main.call_provider", raising_call)
+    monkeypatch.setattr("gateway.router.call_provider", raising_call)
 
-    response = client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+    response = client.post(
+        "/v1/chat/completions?provider=anthropic", json=BODY, headers=HEADERS
+    )
 
     assert response.status_code == 429
 
@@ -175,7 +184,7 @@ async def test_failed_calls_are_recorded_too(client, stub_provider, fake_redis):
         )
     )
 
-    client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+    client.post("/v1/chat/completions?provider=anthropic", json=BODY, headers=HEADERS)
 
     from gateway.health import snapshot
 
@@ -190,7 +199,7 @@ def test_unreachable_redis_does_not_fail_the_request(client, stub_provider, monk
     async def boom(*_args, **_kwargs):
         raise ConnectionError("redis is gone")
 
-    monkeypatch.setattr("gateway.main.health.record", boom)
+    monkeypatch.setattr("gateway.router.health.record", boom)
 
     response = client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
 

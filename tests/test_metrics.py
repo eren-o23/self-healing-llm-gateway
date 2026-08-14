@@ -81,8 +81,11 @@ def test_failures_are_counted_by_taxonomy_type(client, stub_provider):
     labels = {"provider": "groq", "error_type": "rate_limit"}
     before = _value("gateway_provider_errors_total", **labels)
 
+    # Pinned: unpinned, a rate limit now fails over down the whole ladder and the
+    # counter moves once per rung. The walk is test_router.py's subject, not this
+    # file's.
     client.post(
-        "/v1/chat/completions",
+        "/v1/chat/completions?provider=groq",
         json=BODY,
         headers={**HEADERS, "X-Request-Class": "interactive.classify"},
     )

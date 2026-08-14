@@ -167,15 +167,49 @@ def ok_result(provider: str = "anthropic") -> ProviderResult:
 
 @pytest.fixture
 def stub_provider(monkeypatch):
-    """Replace the provider call; these tests are about the gateway, not the network."""
+    """Replace the provider call; these tests are about the gateway, not the network.
+
+    Patched on gateway.router, which is where the dispatch lives now - main.py
+    hands the ladder to the router and never calls a provider itself.
+    """
     calls: list[str] = []
 
     def _install(result: ProviderResult):
-        async def fake_call(name, provider, payload):
+        async def fake_call(name, provider, payload, chaos=None):
             calls.append(name)
             return result
 
-        monkeypatch.setattr("gateway.main.call_provider", fake_call)
+        monkeypatch.setattr("gateway.router.call_provider", fake_call)
         return calls
 
     return _install
+
+
+@pytest.fixture
+def stub_ladder(monkeypatch):
+    """Give each provider its own scripted result, for tests about the walk itself.
+
+    A provider missing from the map succeeds, so a test only has to say which
+    rungs are broken.
+    """
+    calls: list[str] = []
+
+    def _install(results: dict[str, ProviderResult]):
+        async def fake_call(name, provider, payload, chaos=None):
+            calls.append(name)
+            return results.get(name) or ok_result(name)
+
+        monkeypatch.setattr("gateway.router.call_provider", fake_call)
+        return calls
+
+    return _install
+
+
+def failed_result(provider: str, outcome: Outcome, latency_ms: float = 50.0):
+    return ProviderResult(
+        provider=provider,
+        model="test-model",
+        outcome=outcome,
+        latency_ms=latency_ms,
+        error=f"{outcome} from {provider}",
+    )

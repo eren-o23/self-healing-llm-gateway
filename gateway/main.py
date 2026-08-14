@@ -16,9 +16,9 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from gateway import breaker, chaos, health, metrics
+from gateway import breaker, chaos, health, router
 from gateway.config import GatewayConfig, get_config, get_redis
-from gateway.providers import Outcome, ProviderCallLog, ProviderResult, call_provider
+from gateway.providers import Outcome, ProviderCallLog, ProviderResult
 from gateway.schemas import (
     ChaosRequest,
     ChatCompletionRequest,
@@ -225,22 +225,19 @@ async def chat_completions(
     ladder = _resolve_ladder(config, meta.request_class, provider)
     payload = request.to_provider_kwargs()
 
-    # ponytail: phase 1 tries the first rung only. Failover across the ladder,
-    # circuit breaking and hedging land in phase 3 as gateway/router.py.
-    chosen = ladder[0]
-    result = await call_provider(chosen, config.providers[chosen], payload)
+    routed = await router.route(r, config, meta, payload, ladder)
+    attempts = [asdict(a) for a in routed.attempts]
 
-    await _observe(r, result, meta)
+    if routed.result is None:
+        return JSONResponse(
+            status_code=_exhausted_status(routed),
+            content=_exhausted(meta, attempts, routed.last_failure),
+        )
 
-    attempt = ProviderCallLog(
-        provider=result.provider,
-        outcome=str(result.outcome),
-        latency_ms=round(result.latency_ms, 1),
-        error=result.error,
-    )
+    result = routed.result
     log.info(
         "request_id=%s tenant=%s feature=%s class=%s provider=%s outcome=%s "
-        "latency_ms=%.1f cost_usd=%.6f",
+        "latency_ms=%.1f cost_usd=%.6f attempts=%d",
         meta.request_id,
         meta.tenant,
         meta.feature,
@@ -249,6 +246,7 @@ async def chat_completions(
         result.outcome,
         result.latency_ms,
         result.cost_usd,
+        len(attempts),
     )
 
     if not result.outcome.ok:
@@ -263,36 +261,56 @@ async def chat_completions(
                 "x_gateway": {
                     "request_id": meta.request_id,
                     "request_class": meta.request_class,
-                    "attempts": [asdict(attempt)],
+                    "attempts": attempts,
                 },
             },
         )
 
-    return _to_openai_response(result, meta, [attempt])
+    return _to_openai_response(result, meta, routed.attempts)
 
 
-async def _observe(r: Redis, result: ProviderResult, meta: RequestMetadata) -> None:
-    """Record the call to both stores, without letting either failure reach the caller.
+def _exhausted_status(routed: router.RouteOutcome) -> int:
+    """What an exhausted ladder returns.
 
-    Prometheus first and outside the guard: it is in-process and cannot really
-    fail, so it keeps its data even when Redis is unreachable.
-
-    The Redis write is guarded because a monitoring write must not fail a
-    completion the caller has already been billed for - Redis being down should
-    cost observability, not availability.
-
-    The consequence is worth naming because it is phase 3's failure mode: no
-    Redis means an empty window, which reads as healthy, which means nothing
-    trips. That is fail-open, and for a gateway it is the right direction to
-    fail - a broken breaker should not take every provider offline at once.
+    503 is right only when nothing was attempted - every circuit open means there
+    genuinely is no capacity. When rungs did run and failed, the caller gets what
+    actually happened on the last one: a ladder of rate limits is a 429, and
+    flattening that to 503 costs the client the signal telling it to back off
+    instead of retrying straight away.
     """
-    metrics.observe(result, meta)
-    try:
-        await health.record(r, result.provider, result.outcome, result.latency_ms)
-    except Exception:  # noqa: BLE001 - degraded observability beats a failed request
-        log.warning(
-            "health record failed for %s; its window will read thin", result.provider
-        )
+    last = routed.last_failure
+    return _STATUS_BY_OUTCOME[Outcome(last.outcome)] if last else 503
+
+
+def _exhausted(
+    meta: RequestMetadata,
+    attempts: list[dict[str, Any]],
+    last: ProviderCallLog | None,
+) -> dict[str, Any]:
+    """The body when the whole ladder is gone.
+
+    Naming every provider and what it did - failed with what, or skipped because
+    its circuit was open and for how much longer - costs nothing to assemble and
+    is the difference between a debuggable outage and a shrug.
+    """
+    log.error(
+        "ladder exhausted request_id=%s class=%s tried=%s",
+        meta.request_id,
+        meta.request_class,
+        [a["provider"] for a in attempts],
+    )
+    return {
+        "error": {
+            "message": "every provider in the ladder failed or was unavailable",
+            "type": str(last.outcome) if last else "no_provider_available",
+            "ladder": [a["provider"] for a in attempts],
+        },
+        "x_gateway": {
+            "request_id": meta.request_id,
+            "request_class": meta.request_class,
+            "attempts": attempts,
+        },
+    }
 
 
 def _resolve_ladder(
