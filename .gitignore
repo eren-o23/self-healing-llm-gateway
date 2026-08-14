@@ -7,6 +7,9 @@ handoff.md
 # build spec and per-phase notes - kept alongside the code, but not published
 specs/
 
+# knowledge graph build output
+graphify-out/
+
 .env
 .env.*
 !.env.example
