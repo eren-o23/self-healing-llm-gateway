@@ -4,27 +4,35 @@
 # rather than crashing the service - see gateway/config.py. ollama has no
 # api_key_env, so it is always available and acts as the floor of every ladder.
 
+# latency_budget_ms is per provider on purpose. A single global budget would hold
+# ollama's breaker permanently open - local CPU inference genuinely takes ~14s -
+# and taking the floor out of every ladder is the one failure this design cannot
+# recover from.
 providers:
   anthropic:
     model: claude-sonnet-5
     api_key_env: ANTHROPIC_API_KEY
     timeout_s: 30
+    latency_budget_ms: 15000
 
   openai:
     model: gpt-4o-mini
     api_key_env: OPENAI_API_KEY
     timeout_s: 30
+    latency_budget_ms: 15000
 
   groq:
     model: groq/llama-3.3-70b-versatile
     api_key_env: GROQ_API_KEY
     timeout_s: 30
+    latency_budget_ms: 5000  # normally ~150ms; anything near a second is already sick
 
   ollama:
     model: ollama/llama3.2
     api_base_env: OLLAMA_API_BASE
     api_base_default: http://localhost:11434
     timeout_s: 120  # local inference on CPU is slow; do not confuse that with a sick provider
+    latency_budget_ms: 60000  # ~14s is this provider's healthy baseline, not a symptom
 
 # Preference lists differ by class: a cheap classification call and a long form
 # generation call should not fail over the same way.
@@ -33,10 +41,13 @@ classes:
     ladder: [anthropic, openai, groq, ollama]
     deferrable: false
 
+  # anthropic sits at rung 2 rather than ollama because this class hedges, and a
+  # hedge partner that takes ~14s can never beat even a badly degraded groq - the
+  # hedge would fire on every slow call and never once win.
   interactive.classify:
-    ladder: [groq, ollama, openai]
+    ladder: [groq, anthropic, ollama]
     deferrable: false
-    hedge_after_ms: 400  # honoured in phase 3
+    hedge_after_ms: 400
 
   batch.generate:
     ladder: [anthropic, openai, groq, ollama]
@@ -45,6 +56,15 @@ classes:
 default_class: interactive.chat
 
 # The sliding window each provider's success rate and percentiles are computed over.
-# Shorter means the phase 3 breaker reacts faster on thinner evidence.
+# Shorter means the breaker reacts faster on thinner evidence.
 health:
   window_s: 60
+
+# When a provider is taken out of the ladder, and how it gets let back in.
+breaker:
+  error_threshold: 0.5
+  min_samples: 8            # counted over health_samples, so bad input cannot reach it
+  cooldown_s: 20
+  cooldown_max_s: 120
+  probe_ratio: 0.1
+  probe_successes_required: 2

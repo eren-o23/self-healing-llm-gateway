@@ -31,6 +31,11 @@ class ProviderConfig(BaseModel):
     api_base_default: str | None = None
     timeout_s: float = 30.0
 
+    # Per provider, never global. Ollama's ~14s on local CPU is healthy; judging it
+    # against anthropic's budget would hold its breaker open forever and remove the
+    # floor from every ladder.
+    latency_budget_ms: float = 15_000.0
+
     @property
     def api_key(self) -> str | None:
         return os.getenv(self.api_key_env) if self.api_key_env else None
@@ -65,11 +70,29 @@ class HealthConfig(BaseModel):
     window_s: int = 60
 
 
+class BreakerConfig(BaseModel):
+    """When a provider is pulled out of the ladder, and how it earns its way back.
+
+    `min_samples` is the guard against acting on thin evidence, and it is counted
+    over HealthSnapshot.health_samples - successes plus trippable failures - not
+    over the raw window. Counting raw samples would let a hundred bad requests and
+    three real failures clear the threshold at a 100% error rate.
+    """
+
+    error_threshold: float = 0.5
+    min_samples: int = 8
+    cooldown_s: float = 20.0
+    cooldown_max_s: float = 120.0
+    probe_ratio: float = 0.1
+    probe_successes_required: int = 2
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig]
     classes: dict[str, ClassConfig]
     default_class: str
     health: HealthConfig = HealthConfig()
+    breaker: BreakerConfig = BreakerConfig()
 
     @model_validator(mode="after")
     def _check_references(self) -> GatewayConfig:
