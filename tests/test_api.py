@@ -13,7 +13,7 @@ def test_healthz_reports_provider_and_ladder_state(client):
     body = client.get("/healthz").json()
     assert body["status"] == "ok"
     assert body["providers"]["ollama"] == "available"
-    assert body["classes"]["interactive.classify"] == ["groq", "ollama", "openai"]
+    assert body["classes"]["interactive.classify"] == ["groq", "anthropic", "ollama"]
 
 
 def test_models_lists_available_providers(client):
@@ -215,7 +215,7 @@ def test_missing_key_drops_provider_from_ladder(client, monkeypatch):
     assert health["status"] == "ok"
     assert health["providers"]["groq"] == "disabled"
     assert "groq" not in health["classes"]["interactive.classify"]
-    assert health["classes"]["interactive.classify"] == ["ollama", "openai"]
+    assert health["classes"]["interactive.classify"] == ["anthropic", "ollama"]
 
 
 def test_pinning_a_disabled_provider_is_503(client, monkeypatch):

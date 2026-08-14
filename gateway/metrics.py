@@ -10,7 +10,7 @@ second time it runs.
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 from gateway.providers import ProviderResult
 from gateway.schemas import RequestMetadata
@@ -53,6 +53,31 @@ COST = Counter(
     "gateway_cost_usd_total",
     "Spend attributed to the tenant and feature that caused it",
     ["tenant", "feature", "provider", "model"],
+)
+
+# The demo's most important panel: a timeline of this gauge is the trip, the
+# reroute and the recovery in one line. Set on every breaker read rather than
+# only on transitions, so it stays live for as long as traffic flows.
+CIRCUIT_STATE = Gauge(
+    "gateway_circuit_state",
+    "Breaker state per provider: 0 closed, 1 open, 2 half-open",
+    ["provider"],
+)
+
+# "from" is a Python keyword, so these labels are passed as **{"from": ...} -
+# the same shape observe() already needs for "class".
+FAILOVERS = Counter(
+    "gateway_failovers_total",
+    "Ladder hops taken because a provider failed",
+    ["from", "to", "class", "reason"],
+)
+
+# Hedging roughly doubles spend on the calls it fires. Measuring fired vs won vs
+# wasted turns that from a caveat in the README into a number on a dashboard.
+HEDGE = Counter(
+    "gateway_hedge_total",
+    "Hedge outcomes: fired, won_by_hedge, wasted",
+    ["class", "outcome"],
 )
 
 

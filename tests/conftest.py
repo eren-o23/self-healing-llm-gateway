@@ -10,19 +10,32 @@ from gateway.providers import Outcome, ProviderResult
 
 TEST_CONFIG = {
     "providers": {
-        "anthropic": {"model": "claude-sonnet-5", "api_key_env": "ANTHROPIC_API_KEY"},
-        "openai": {"model": "gpt-4o-mini", "api_key_env": "OPENAI_API_KEY"},
-        "groq": {"model": "groq/llama-3.3-70b-versatile", "api_key_env": "GROQ_API_KEY"},
+        "anthropic": {
+            "model": "claude-sonnet-5",
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "latency_budget_ms": 15000,
+        },
+        "openai": {
+            "model": "gpt-4o-mini",
+            "api_key_env": "OPENAI_API_KEY",
+            "latency_budget_ms": 15000,
+        },
+        "groq": {
+            "model": "groq/llama-3.3-70b-versatile",
+            "api_key_env": "GROQ_API_KEY",
+            "latency_budget_ms": 5000,
+        },
         "ollama": {
             "model": "ollama/llama3.2",
             "api_base_env": "OLLAMA_API_BASE",
             "api_base_default": "http://localhost:11434",
+            "latency_budget_ms": 60000,
         },
     },
     "classes": {
         "interactive.chat": {"ladder": ["anthropic", "openai", "groq", "ollama"]},
         "interactive.classify": {
-            "ladder": ["groq", "ollama", "openai"],
+            "ladder": ["groq", "anthropic", "ollama"],
             "hedge_after_ms": 400,
         },
         "batch.generate": {
@@ -31,6 +44,16 @@ TEST_CONFIG = {
         },
     },
     "default_class": "interactive.chat",
+    # Spelled out rather than inherited from the shipped defaults, so tuning
+    # config/gateway.yaml for the demo cannot silently rewrite what these assert.
+    "breaker": {
+        "error_threshold": 0.5,
+        "min_samples": 4,
+        "cooldown_s": 10,
+        "cooldown_max_s": 40,
+        "probe_ratio": 0.1,
+        "probe_successes_required": 2,
+    },
 }
 
 
@@ -58,8 +81,24 @@ def fake_redis():
 
 
 @pytest.fixture
-def client(config_path, monkeypatch, all_keys_set, fake_redis):
-    """App wired to the test config and a fake Redis, caches cleared either side.
+def use_test_config(config_path, monkeypatch):
+    """Point get_config() at TEST_CONFIG, clearing the cache either side.
+
+    get_config is lru_cached, and unlike a monkeypatched key - which
+    ProviderConfig.available reads live - changing GATEWAY_CONFIG only takes
+    effect once the cache is dropped. Anything calling get_config() outside a
+    request needs this; breaker.py reads thresholds and latency budgets on every
+    call, so its tests do.
+    """
+    monkeypatch.setenv("GATEWAY_CONFIG", str(config_path))
+    get_config.cache_clear()
+    yield
+    get_config.cache_clear()
+
+
+@pytest.fixture
+def client(monkeypatch, use_test_config, all_keys_set, fake_redis):
+    """App wired to the test config and a fake Redis.
 
     The Redis override is not a nicety: every request now records health, so
     without it each of these tests would sit through a TCP connect to a Redis
@@ -67,13 +106,10 @@ def client(config_path, monkeypatch, all_keys_set, fake_redis):
     """
     from gateway.main import app
 
-    monkeypatch.setenv("GATEWAY_CONFIG", str(config_path))
-    get_config.cache_clear()
     app.dependency_overrides[get_redis] = lambda: fake_redis
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
-    get_config.cache_clear()
 
 
 HEADERS = {

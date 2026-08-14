@@ -60,7 +60,8 @@ class HealthSnapshot:
     p99_ms: float = 0.0
 
 
-def _key(provider: str) -> str:
+def key(provider: str) -> str:
+    """Public: breaker.py clears this window when a circuit starts probing."""
     return f"health:{provider}"
 
 
@@ -93,9 +94,9 @@ async def record(
     member = f"{now_ms}:{uuid.uuid4().hex[:8]}:{outcome}:{latency_ms:.1f}"
 
     pipe = r.pipeline()
-    pipe.zadd(_key(provider), {member: now_ms})
-    pipe.zremrangebyscore(_key(provider), "-inf", now_ms - window_ms)
-    pipe.expire(_key(provider), (window_ms // 1000) * 2)
+    pipe.zadd(key(provider), {member: now_ms})
+    pipe.zremrangebyscore(key(provider), "-inf", now_ms - window_ms)
+    pipe.expire(key(provider), (window_ms // 1000) * 2)
     await pipe.execute()
 
 
@@ -117,7 +118,7 @@ async def snapshot(
     """
     now_ms = _now_ms() if now_ms is None else now_ms
     cutoff = now_ms - _window_ms(window_s)
-    members = await r.zrangebyscore(_key(provider), f"({cutoff}", "+inf")
+    members = await r.zrangebyscore(key(provider), f"({cutoff}", "+inf")
     return _summarise(provider, members)
 
 
