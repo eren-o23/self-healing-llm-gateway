@@ -21,7 +21,7 @@ TEST_CONFIG = {
             "latency_budget_ms": 15000,
         },
         "groq": {
-            "model": "groq/llama-3.3-70b-versatile",
+            "model": "groq/openai/gpt-oss-120b",
             "api_key_env": "GROQ_API_KEY",
             "latency_budget_ms": 5000,
         },

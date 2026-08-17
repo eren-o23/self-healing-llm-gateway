@@ -140,3 +140,20 @@ async def test_injected_latency_lands_inside_the_measured_span():
 
 async def test_latency_only_chaos_does_not_raise():
     await chaos.ChaosSpec(provider="groq", error_rate=0.0, latency_ms=1).apply()
+
+
+def test_cost_survives_a_model_id_that_contains_a_slash():
+    """Regression: `groq/openai/gpt-oss-120b` has two slashes, and that broke pricing.
+
+    completion_cost() sniffs the provider from the model string, so the second
+    segment won and it looked up `openai` - where this price does not live. The
+    lookup raised, _cost_of swallowed it, and a genuinely billed call recorded
+    $0. The price table had the key all along; only the routing to it was wrong.
+    """
+    configured = "groq/openai/gpt-oss-120b"
+
+    assert configured in litellm.model_cost, "premise: the configured name is priced"
+
+    assert _cost_of(_usage_response(configured), configured) > 0.0
+    # And the sibling model in the same family, since both are in the ladder's reach.
+    assert _cost_of(_usage_response("groq/openai/gpt-oss-20b"), "groq/openai/gpt-oss-20b") > 0.0

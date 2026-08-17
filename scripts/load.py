@@ -21,7 +21,11 @@ import urllib.request
 
 BODY = {
     "messages": [{"role": "user", "content": "Reply with one word: ok"}],
-    "max_tokens": 8,
+    # 64 rather than 8: groq now runs a reasoning model, which spends ~20 tokens
+    # thinking before it emits anything. At 8 it returns finish_reason=length and
+    # empty content - a successful call with nothing in it, which reads on camera
+    # as a broken gateway.
+    "max_tokens": 64,
 }
 
 

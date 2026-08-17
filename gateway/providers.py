@@ -128,13 +128,28 @@ def _cost_of(response: Any, model: str) -> float:
     genuinely billed. Silent zero-cost is the failure mode that guts the whole
     point of a gateway, so the caller's configured name wins.
 
+    The provider is resolved explicitly for the same reason the model name is.
+    completion_cost() otherwise sniffs it from the string, and a model id that
+    itself contains a slash defeats that: "groq/openai/gpt-oss-120b" reads as
+    provider "openai", which is not where the price lives, so the lookup raises
+    and the except below turns a billed call into $0. The price table has the
+    key - only the routing to it was wrong.
+
     Self-hosted models (ollama) are genuinely free; unknown hosted models are a
     gap in LiteLLM's table. Both must return a number rather than raising - a
     pricing gap is not a reason to fail a request that already succeeded.
     """
     try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+    except Exception:  # noqa: BLE001 - unknown prefix; let completion_cost try
+        provider = None
+
+    try:
         return float(
-            litellm.completion_cost(completion_response=response, model=model) or 0.0
+            litellm.completion_cost(
+                completion_response=response, model=model, custom_llm_provider=provider
+            )
+            or 0.0
         )
     except Exception:  # noqa: BLE001 - any pricing failure degrades to zero
         return 0.0

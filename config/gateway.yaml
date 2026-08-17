@@ -22,7 +22,11 @@ providers:
     latency_budget_ms: 15000
 
   groq:
-    model: groq/llama-3.3-70b-versatile
+    # Was groq/llama-3.3-70b-versatile until Groq decommissioned it. Note the
+    # double prefix: the model id is itself "openai/gpt-oss-120b", so the
+    # configured name has two slashes. That breaks LiteLLM's provider sniffing
+    # in completion_cost - see _cost_of() in providers.py.
+    model: groq/openai/gpt-oss-120b
     api_key_env: GROQ_API_KEY
     timeout_s: 30
     latency_budget_ms: 5000  # normally ~150ms; anything near a second is already sick
