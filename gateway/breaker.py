@@ -54,6 +54,29 @@ class CircuitState:
     retry_in_s: float = 0.0
 
 
+async def seed_gauge(r: Redis, providers: list[str]) -> None:
+    """Publish every circuit to Prometheus before any traffic arrives.
+
+    gateway_circuit_state is set as a side effect of reading a breaker, so on a
+    cold stack the gauge has no series at all: /metrics carries its HELP and TYPE
+    lines and nothing else, and the circuit timeline - the panel the whole demo
+    is built around - stays blank until traffic happens to flow. "docker compose
+    up gives a working dashboard" is an acceptance criterion, so both processes
+    call this at startup.
+
+    Guarded, because Redis may not be up yet and observability must never be the
+    thing that stops the gateway booting. Same fail-open rule as router._observe.
+
+    Lives here rather than in main.py so worker.py can call it without importing
+    the FastAPI app, for the same reason to_openai_response sits in schemas.
+    """
+    try:
+        for provider in providers:
+            await state_of(r, provider)
+    except Exception:  # noqa: BLE001 - a blank panel beats a service that will not start
+        log.warning("could not seed circuit state; panels fill in on the first request")
+
+
 def _key(provider: str) -> str:
     return f"breaker:{provider}"
 

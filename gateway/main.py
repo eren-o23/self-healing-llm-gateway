@@ -10,12 +10,12 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from gateway import breaker, chaos, health, idempotency, queue, router
+from gateway import breaker, chaos, health, idempotency, metrics, queue, router
 from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.providers import Outcome, ProviderCallLog
 from gateway.schemas import (
@@ -47,7 +47,15 @@ _STATUS_BY_OUTCOME: dict[Outcome, int] = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    get_config().log_startup_state()
+    config = get_config()
+    config.log_startup_state()
+    # Through dependency_overrides rather than calling get_redis() straight,
+    # because startup is outside the request cycle and would otherwise ignore
+    # the override every test sets - opening a real connection to whatever is
+    # listening on localhost:6379, which is worse than slow: it silently passes
+    # against leftover state from a compose stack somebody forgot to stop.
+    resolve = app.dependency_overrides.get(get_redis, get_redis)
+    await breaker.seed_gauge(resolve(), list(config.providers))
     yield
 
 
@@ -56,6 +64,28 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def count_responses(request: Request, call_next):
+    """Count what the caller was actually told.
+
+    One middleware rather than an increment at each return, because
+    chat_completions has four of those plus HTTPExceptions raised from
+    _resolve_ladder, _replay and require_admin - the same reasoning that put the
+    idempotency release in a single `except BaseException` instead of at every
+    exit. A response the counter misses is a response the availability figure
+    silently rounds in its own favour.
+
+    Labelled with the templated route rather than the raw path, so /v1/jobs/{id}
+    is one series and not one per job id.
+    """
+    response = await call_next(request)
+    route = request.scope.get("route")
+    metrics.RESPONSES.labels(
+        route=getattr(route, "path", "unmatched"), status=str(response.status_code)
+    ).inc()
+    return response
 
 
 def require_metadata(

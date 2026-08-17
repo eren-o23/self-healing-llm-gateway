@@ -11,7 +11,7 @@ import pytest
 from prometheus_client import REGISTRY
 
 from gateway.providers import Outcome, ProviderResult
-from tests.conftest import BODY, HEADERS, ok_result
+from tests.conftest import BODY, HEADERS, failed_result, ok_result
 
 
 def _value(name: str, **labels) -> float:
@@ -115,6 +115,99 @@ def test_failed_calls_do_not_book_cost_or_tokens(client, stub_provider):
     client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
 
     assert _value("gateway_cost_usd_total", **labels) == before
+
+
+# --- client-facing responses --------------------------------------------------
+
+
+def test_one_response_is_counted_once_however_many_rungs_it_took(
+    client, stub_ladder
+):
+    """The distinction the availability figure depends on.
+
+    Two providers fail, the third serves: three provider calls, one answer to the
+    caller. Counting availability off gateway_requests_total would put those
+    failures in the denominator - so an outage the gateway completely absorbed
+    would drag the number down, and one it absorbed by hedging would push it up.
+    """
+    labels = {"route": "/v1/chat/completions", "status": "200"}
+    before = _value("gateway_responses_total", **labels)
+    calls = stub_ladder(
+        {
+            "anthropic": failed_result("anthropic", Outcome.SERVER_ERROR),
+            "openai": failed_result("openai", Outcome.TIMEOUT),
+        }
+    )
+
+    client.post("/v1/chat/completions", json=BODY, headers=HEADERS)
+
+    assert len(calls) == 3
+    assert _value("gateway_responses_total", **labels) == before + 1
+
+
+def test_a_rejection_raised_before_the_ladder_is_still_counted(client):
+    """Streaming is refused with a 400 raised straight out of the handler.
+
+    Nothing routes, so a counter incremented next to the ladder would miss it
+    entirely - and a 5xx raised the same way is exactly what the availability
+    figure must not be allowed to overlook. Hence one middleware rather than an
+    increment per return path.
+    """
+    labels = {"route": "/v1/chat/completions", "status": "400"}
+    before = _value("gateway_responses_total", **labels)
+
+    response = client.post(
+        "/v1/chat/completions", json={**BODY, "stream": True}, headers=HEADERS
+    )
+
+    assert response.status_code == 400
+    assert _value("gateway_responses_total", **labels) == before + 1
+
+
+def test_the_job_route_is_one_series_not_one_per_job(client):
+    """A raw path label here would mint a new time series per job id."""
+    client.get("/v1/jobs/some-job-id", headers=HEADERS)
+    client.get("/v1/jobs/another-job-id", headers=HEADERS)
+
+    assert _value("gateway_responses_total", route="/v1/jobs/{job_id}", status="404") >= 2
+
+
+# --- circuit gauge ------------------------------------------------------------
+
+
+async def test_the_circuit_gauge_has_series_before_any_traffic(
+    fake_redis, use_test_config
+):
+    """The demo's money panel must not be blank on a cold `docker compose up`.
+
+    The gauge is only ever set as a side effect of reading a breaker, so with no
+    seeding a freshly started stack exports the HELP and TYPE lines and nothing
+    underneath them.
+    """
+    from gateway import breaker
+    from gateway.config import get_config
+
+    providers = list(get_config().providers)
+    await breaker.seed_gauge(fake_redis, providers)
+
+    for provider in providers:
+        # `is not None` rather than `== 0`: a missing series and a closed circuit
+        # both read as zero through get_sample_value, and it is the missing one
+        # this exists to catch.
+        assert REGISTRY.get_sample_value(
+            "gateway_circuit_state", {"provider": provider}
+        ) is not None
+
+
+async def test_seeding_survives_redis_being_down(use_test_config):
+    """Boot order is not guaranteed, and a blank panel beats a service that won't start."""
+    from gateway import breaker
+
+    class _Dead:
+        async def hgetall(self, *_args, **_kwargs):
+            raise ConnectionError("redis is not up yet")
+
+    await breaker.seed_gauge(_Dead(), ["anthropic"])
 
 
 def test_latency_buckets_reach_past_ollama(client, stub_provider):

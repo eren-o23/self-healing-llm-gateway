@@ -26,7 +26,7 @@ import time
 from prometheus_client import start_http_server
 from redis.asyncio import Redis
 
-from gateway import metrics, queue, router
+from gateway import breaker, metrics, queue, router
 from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.queue import Job, Status
 from gateway.schemas import to_openai_response
@@ -184,6 +184,11 @@ async def main() -> None:
     )
 
     r = get_redis()
+    # This process exports gateway_circuit_state too, and an idle queue means it
+    # would export no series at all until a job happens to route. Same reason as
+    # the API's lifespan seeding, and the same fail-open guard.
+    await breaker.seed_gauge(r, list(config.providers))
+
     while True:
         try:
             worked = await run_once(r, config)

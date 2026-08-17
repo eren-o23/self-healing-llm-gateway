@@ -26,6 +26,21 @@ REQUESTS = Counter(
     ["provider", "model", "class", "tenant", "feature", "outcome"],
 )
 
+# Not a second view of REQUESTS: that one counts calls *out* to providers, this
+# one counts answers *back* to callers. A request that fails over twice and then
+# succeeds is three REQUESTS and one RESPONSES, so during an outage REQUESTS
+# rises while the client-facing view holds flat - which is the entire claim the
+# project makes, and unmeasurable from provider counts alone.
+#
+# It is also what the availability figure divides. Computed off REQUESTS instead,
+# every failover would inflate the denominator and the number would come out
+# wrong in the flattering direction.
+RESPONSES = Counter(
+    "gateway_responses_total",
+    "Responses returned to the caller, whatever the ladder did to produce them",
+    ["route", "status"],
+)
+
 # The default buckets stop at 10s. Ollama genuinely takes ~14s on CPU and carries
 # a deliberate 120s timeout, so on defaults every local call lands in +Inf and its
 # p95 is unreadable - which would quietly break phase 3's per-provider latency
