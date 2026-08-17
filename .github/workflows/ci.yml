@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # One job, no services. The suite overrides get_redis with fakeredis, so there
+  # is nothing to stand up - and a CI that needs a Redis container to run unit
+  # tests is a CI that will eventually be red for reasons about Redis.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      - run: uv run ruff check
+
+      - run: uv run pytest
