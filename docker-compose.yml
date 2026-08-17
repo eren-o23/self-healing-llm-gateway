@@ -18,6 +18,26 @@ services:
       redis:
         condition: service_healthy
 
+  # Same image, different entrypoint. Its own service rather than a background
+  # task inside the gateway, so a deploy or a crash on either side does not take
+  # the other down - which is the whole claim the queue is making.
+  worker:
+    build: .
+    command: ["python", "-m", "gateway.worker"]
+    ports:
+      - "8001:8001"  # its own registry, scraped as a second Prometheus target
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OLLAMA_API_BASE: http://host.docker.internal:11434
+      REDIS_URL: redis://redis:6379/0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:v3.1.0
     ports:

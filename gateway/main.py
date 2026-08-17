@@ -6,8 +6,6 @@ import json
 import logging
 import os
 import secrets
-import time
-import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Annotated, Any
@@ -19,16 +17,12 @@ from redis.asyncio import Redis
 
 from gateway import breaker, chaos, health, idempotency, router
 from gateway.config import GatewayConfig, get_config, get_redis
-from gateway.providers import Outcome, ProviderCallLog, ProviderResult
+from gateway.providers import Outcome, ProviderCallLog
 from gateway.schemas import (
     ChaosRequest,
     ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatMessage,
-    Choice,
-    GatewayMeta,
     RequestMetadata,
-    Usage,
+    to_openai_response,
 )
 
 log = logging.getLogger(__name__)
@@ -325,7 +319,7 @@ async def _serve(
             },
         }
 
-    return 200, _to_openai_response(result, meta, routed.attempts).model_dump(mode="json")
+    return 200, to_openai_response(result, meta, routed.attempts).model_dump(mode="json")
 
 
 def _exhausted_status(routed: router.RouteOutcome) -> int:
@@ -400,40 +394,3 @@ def _resolve_ladder(
     return ladder
 
 
-def _to_openai_response(
-    result: ProviderResult, meta: RequestMetadata, attempts: list[ProviderCallLog]
-) -> ChatCompletionResponse:
-    response = result.response
-    choices = [
-        Choice(
-            index=getattr(c, "index", i),
-            message=ChatMessage(
-                role=getattr(c.message, "role", "assistant") or "assistant",
-                content=getattr(c.message, "content", None),
-            ),
-            finish_reason=getattr(c, "finish_reason", None),
-        )
-        for i, c in enumerate(getattr(response, "choices", []))
-    ]
-    return ChatCompletionResponse(
-        id=getattr(response, "id", None) or f"chatcmpl-{uuid.uuid4().hex}",
-        created=getattr(response, "created", None) or int(time.time()),
-        model=getattr(response, "model", None) or result.model,
-        choices=choices,
-        usage=Usage(
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            total_tokens=result.total_tokens,
-        ),
-        x_gateway=GatewayMeta(
-            provider=result.provider,
-            model=result.model,
-            request_class=meta.request_class,
-            request_id=meta.request_id,
-            tenant=meta.tenant,
-            feature=meta.feature,
-            latency_ms=round(result.latency_ms, 1),
-            cost_usd=result.cost_usd,
-            attempts=[asdict(a) for a in attempts],
-        ),
-    )

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import time
+import uuid
+from dataclasses import asdict
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from gateway.providers import ProviderCallLog, ProviderResult
 
 
 class ChatMessage(BaseModel):
@@ -93,3 +98,48 @@ class ChaosRequest(BaseModel):
     latency_ms: int = Field(default=0, ge=0, le=120_000)
     error_type: str = "server_error"
     ttl_s: int = Field(default=120, gt=0, le=3600)
+
+
+def to_openai_response(
+    result: ProviderResult, meta: RequestMetadata, attempts: list[ProviderCallLog]
+) -> ChatCompletionResponse:
+    """Turn whichever provider answered into the one shape callers see.
+
+    Lives here rather than in main.py because the worker builds the same object
+    for a queued job, and a background process reaching into the FastAPI module
+    for a private helper is the wrong direction of dependency.
+    """
+    response = result.response
+    choices = [
+        Choice(
+            index=getattr(c, "index", i),
+            message=ChatMessage(
+                role=getattr(c.message, "role", "assistant") or "assistant",
+                content=getattr(c.message, "content", None),
+            ),
+            finish_reason=getattr(c, "finish_reason", None),
+        )
+        for i, c in enumerate(getattr(response, "choices", []))
+    ]
+    return ChatCompletionResponse(
+        id=getattr(response, "id", None) or f"chatcmpl-{uuid.uuid4().hex}",
+        created=getattr(response, "created", None) or int(time.time()),
+        model=getattr(response, "model", None) or result.model,
+        choices=choices,
+        usage=Usage(
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            total_tokens=result.total_tokens,
+        ),
+        x_gateway=GatewayMeta(
+            provider=result.provider,
+            model=result.model,
+            request_class=meta.request_class,
+            request_id=meta.request_id,
+            tenant=meta.tenant,
+            feature=meta.feature,
+            latency_ms=round(result.latency_ms, 1),
+            cost_usd=result.cost_usd,
+            attempts=[asdict(a) for a in attempts],
+        ),
+    )

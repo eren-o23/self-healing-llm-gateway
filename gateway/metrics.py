@@ -80,6 +80,38 @@ HEDGE = Counter(
     ["class", "outcome"],
 )
 
+# The queue collectors are produced by worker.py, which is a separate process
+# with its own registry - it serves them on its own port and Prometheus scrapes
+# it as a second target. They are defined here anyway so every collector in the
+# project has one home.
+
+QUEUE_DEPTH = Gauge(
+    "gateway_queue_depth",
+    "Deferred jobs waiting to run",
+)
+
+QUEUE_RETRIES = Counter(
+    "gateway_queue_retries_total",
+    "Deferred jobs put back for another attempt",
+    ["attempt"],
+)
+
+DLQ = Counter(
+    "gateway_dlq_total",
+    "Jobs that ran out of attempts and were dead-lettered",
+)
+
+# Buckets reach ten minutes for the same reason DURATION's reach two: a job that
+# backs off five times at up to 60s a go is legitimately minutes old, and on
+# prometheus_client's defaults - which stop at 10s - every drained job would land
+# in +Inf and the panel would show nothing.
+JOB_AGE = Histogram(
+    "gateway_job_age_seconds",
+    "Enqueue to terminal state, by how the job ended",
+    ["status"],
+    buckets=(1, 2, 5, 10, 30, 60, 120, 300, 600),
+)
+
 
 def observe(result: ProviderResult, meta: RequestMetadata) -> None:
     """Fold one provider call into every collector. In-process, so it cannot fail."""

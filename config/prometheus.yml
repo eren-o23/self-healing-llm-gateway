@@ -12,3 +12,10 @@ scrape_configs:
       # second, permanently-down target is not committed because it would show
       # as a scrape error on the demo dashboard.
       - targets: ["gateway:8000"]
+
+  # The worker is a separate process with its own registry, so the queue
+  # collectors cannot appear on the gateway's /metrics. Unlike a host-mode
+  # target, this one is up whenever compose is up.
+  - job_name: worker
+    static_configs:
+      - targets: ["worker:8001"]
