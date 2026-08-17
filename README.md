@@ -1,11 +1,41 @@
 # Self-Healing LLM Gateway
 
-An OpenAI-compatible gateway that sits in front of several model providers and keeps serving when
-one of them breaks. Per-provider circuit breaking, automatic failover down a per-class ladder, a
-retry queue for deferrable work, and cost attributed to the tenant and feature that caused it.
+[![CI](https://github.com/eren-o23/self-healing-llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/eren-o23/self-healing-llm-gateway/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?logo=grafana&logoColor=white)
 
-The claim is meant to be watched rather than believed, so `scripts/demo.sh` breaks a provider on
-purpose while traffic keeps flowing.
+**An OpenAI-compatible LLM gateway that keeps serving when a provider goes down.**
+
+**Why it exists.** Anything built on a hosted model inherits that provider's outages, rate limits
+and retired models. This is the layer that makes somebody else's bad day survivable: it notices the
+failure, routes around it, and lets the provider back in once it recovers — instead of passing a
+502 straight through to your users.
+
+**Start here.** [What the demo produced](#what-the-demo-actually-produced) is ten lines of output
+and shows the whole arc. If you read one design section, make it
+[the error taxonomy](#the-error-taxonomy-is-the-spine) — it is the decision everything else falls
+out of.
+
+## The short version
+
+- **Circuit breaking, per provider.** A failing backend is taken out of rotation; half-open probes
+  let it back in on its own. State lives in Redis, so it survives a restart.
+- **Automatic failover** down a ladder that differs by request class — a cheap classification call
+  and a long generation call should not fail over the same way. One class hedges.
+- **A retry queue for deferrable work.** When there is nowhere to send a request, the API answers
+  `202` with a job id and a separate worker drains it later, with backoff, idempotency and a DLQ.
+- **Cost attributed** to the tenant and feature that caused it, enforced at the boundary.
+- **Measured, not asserted.** In one clean run, 60/60 requests returned 200 through a 30-second
+  total failure of the provider that had been serving all of them. The figure comes out of
+  Prometheus in three lines of arithmetic, [below](#what-the-demo-actually-produced).
+- **169 tests**, no services needed, plus a demo script that breaks a provider on purpose so the
+  claim can be watched rather than believed.
+
+**Stack:** Python 3.12 · FastAPI · Redis · Prometheus · Grafana · LiteLLM (as an adapter only) ·
+Docker Compose.
 
 <!-- Screenshots of the board during a demo run go here: healthy, tripped, recovered. -->
 
