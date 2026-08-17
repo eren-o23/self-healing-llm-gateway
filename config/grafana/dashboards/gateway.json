@@ -65,7 +65,7 @@
       "id": 2,
       "type": "state-timeline",
       "title": "Circuit state",
-      "description": "The money panel. Aggregated with max() because the gateway and the worker each export this gauge and the worker's view only advances when it happens to route a job - unaggregated, every provider draws two rows that disagree.",
+      "description": "The money panel. Scoped to the gateway job on purpose: the circuit itself lives in Redis and both processes export their own reading of it, but the worker only re-reads when it happens to route a job, so an idle queue leaves its gauge frozen at whatever it last saw. Aggregating the two - max() especially - lets that stale value outvote the live one and paints a provider OPEN while it is visibly serving traffic. Two views of one fact, so take the one that is continuously refreshed. (This is not the sum-across-jobs rule the request counters need: those count genuinely different work.)",
       "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
@@ -94,7 +94,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (provider) (gateway_circuit_state)",
+          "expr": "gateway_circuit_state{job=\"gateway\"}",
           "legendFormat": "{{provider}}"
         }
       ]
