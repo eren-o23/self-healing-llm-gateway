@@ -114,3 +114,19 @@ def test_no_key_means_no_guard(client, stub_provider):
             == 200
         )
     assert calls == ["anthropic", "anthropic"]
+
+
+async def test_replaying_a_deferrable_request_returns_the_same_job(
+    client, stub_provider, fake_redis
+):
+    """The stored envelope carries its status, so a 202 replays as a 202."""
+    stub_provider(ok_result())
+    deferrable = HEADERS | KEY | {"X-Request-Class": "batch.generate"}
+
+    first = client.post("/v1/chat/completions", json=BODY, headers=deferrable)
+    second = client.post("/v1/chat/completions", json=BODY, headers=deferrable)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["job_id"] == second.json()["job_id"]
+    # One job, not two. A retried submission must not double the work.
+    assert await fake_redis.zcard("queue:ready") == 1

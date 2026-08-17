@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from gateway import breaker, chaos, health, idempotency, router
+from gateway import breaker, chaos, health, idempotency, queue, router
 from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.providers import Outcome, ProviderCallLog
 from gateway.schemas import (
@@ -184,6 +184,17 @@ async def admin_chaos_clear(
     return {"provider": provider, "cleared": await chaos.clear(r, provider)}
 
 
+@admin.get("/dlq")
+async def admin_dlq(r: Annotated[Redis, Depends(get_redis)]) -> dict[str, Any]:
+    """Work that survived an outage and still ran out of attempts.
+
+    Deliberately not a list of everything that failed - a job rejected for bad
+    input never got here, so anything in this queue is worth looking at.
+    """
+    jobs = await queue.dead(r)
+    return {"count": len(jobs), "jobs": [job.public() for job in jobs]}
+
+
 app.include_router(admin)
 
 
@@ -281,6 +292,13 @@ async def _serve(
     release, rather than one at each of three returns - which is the shape that
     eventually grows a fourth return nobody remembers to wire up.
     """
+    # Classification at the boundary, exactly as phase 1 set it up: an
+    # interactive class fails fast, a deferrable one is accepted and drained
+    # later. An explicit ?provider= pin is an operator saying "call this now",
+    # so it takes the synchronous path whatever the class says.
+    if provider is None and config.classes[meta.request_class].deferrable:
+        return await _accept(r, meta, request)
+
     ladder = _resolve_ladder(config, meta.request_class, provider)
     payload = request.to_provider_kwargs()
 
@@ -320,6 +338,54 @@ async def _serve(
         }
 
     return 200, to_openai_response(result, meta, routed.attempts).model_dump(mode="json")
+
+
+async def _accept(
+    r: Redis, meta: RequestMetadata, request: ChatCompletionRequest
+) -> tuple[int, dict[str, Any]]:
+    """Take the work now, do it later.
+
+    This is what a total outage costs a deferrable caller: a job id instead of a
+    completion. Nothing is attempted here - queueing only when the ladder has
+    already failed would make the 202 arrive after every rung had timed out,
+    which is the worst of both shapes.
+    """
+    job_id = await queue.enqueue(r, meta, request.to_provider_kwargs())
+    log.info(
+        "queued job=%s request_id=%s tenant=%s feature=%s class=%s",
+        job_id,
+        meta.request_id,
+        meta.tenant,
+        meta.feature,
+        meta.request_class,
+    )
+    return 202, {
+        "job_id": job_id,
+        "status": str(queue.Status.QUEUED),
+        "poll": f"/v1/jobs/{job_id}",
+        "x_gateway": {
+            "request_id": meta.request_id,
+            "request_class": meta.request_class,
+        },
+    }
+
+
+@app.get("/v1/jobs/{job_id}")
+async def get_job(
+    job_id: str,
+    meta: Annotated[RequestMetadata, Depends(require_metadata)],
+    r: Annotated[Redis, Depends(get_redis)],
+) -> dict[str, Any]:
+    """Collect a deferred result.
+
+    Another tenant's job is a 404 rather than a 403: a job id is the only thing
+    a caller needs to guess, and confirming that one exists is the half of the
+    answer worth withholding.
+    """
+    job = await queue.get(r, job_id)
+    if job is None or job.meta.tenant != meta.tenant:
+        raise HTTPException(status_code=404, detail=f"no job {job_id!r}")
+    return job.public()
 
 
 def _exhausted_status(routed: router.RouteOutcome) -> int:

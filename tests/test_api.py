@@ -290,3 +290,74 @@ def test_admin_circuits_reports_every_provider(client):
 
     assert set(body) == {"anthropic", "openai", "groq", "ollama"}
     assert body["anthropic"]["state"] == "closed"
+
+
+# --- deferrable work ----------------------------------------------------------
+
+DEFERRABLE = HEADERS | {"X-Request-Class": "batch.generate"}
+
+
+def test_a_deferrable_class_is_accepted_rather_than_attempted(client, stub_provider):
+    calls = stub_provider(ok_result())
+
+    response = client.post("/v1/chat/completions", json=BODY, headers=DEFERRABLE)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["poll"] == f"/v1/jobs/{body['job_id']}"
+    # Nothing was tried. Queueing only after the ladder fails would make the 202
+    # arrive once every rung had already timed out.
+    assert calls == []
+
+
+def test_a_queued_job_can_be_polled(client, stub_provider):
+    stub_provider(ok_result())
+    job_id = client.post(
+        "/v1/chat/completions", json=BODY, headers=DEFERRABLE
+    ).json()["job_id"]
+
+    job = client.get(f"/v1/jobs/{job_id}", headers=HEADERS).json()
+
+    assert job["job_id"] == job_id
+    assert job["status"] == "queued"
+    assert job["request_class"] == "batch.generate"
+    assert job["response"] is None
+
+
+def test_an_unknown_job_is_a_404(client):
+    assert client.get("/v1/jobs/nope", headers=HEADERS).status_code == 404
+
+
+def test_another_tenants_job_is_a_404_not_a_403(client, stub_provider):
+    """404 withholds the half of the answer worth withholding: that it exists."""
+    stub_provider(ok_result())
+    job_id = client.post(
+        "/v1/chat/completions", json=BODY, headers=DEFERRABLE
+    ).json()["job_id"]
+
+    response = client.get(
+        f"/v1/jobs/{job_id}", headers=HEADERS | {"X-Tenant-Id": "globex"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_pinning_a_provider_bypasses_the_queue(client, stub_provider):
+    """An explicit pin is an operator saying "call this now"."""
+    calls = stub_provider(ok_result())
+
+    response = client.post(
+        "/v1/chat/completions?provider=anthropic", json=BODY, headers=DEFERRABLE
+    )
+
+    assert response.status_code == 200
+    assert calls == ["anthropic"]
+
+
+def test_the_dlq_is_empty_and_guarded(client):
+    assert client.get("/admin/dlq").status_code == 403
+    assert client.get("/admin/dlq", headers=ADMIN_HEADERS).json() == {
+        "count": 0,
+        "jobs": [],
+    }
