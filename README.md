@@ -7,7 +7,7 @@
 ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-F46800?logo=grafana&logoColor=white)
 
-**An OpenAI-compatible LLM gateway that keeps serving when a provider goes down.**
+**A LLM gateway that keeps serving when a provider goes down.**
 
 **Why it exists.** Anything built on a hosted model inherits that provider's outages, rate limits
 and retired models. This is the layer that makes somebody else's bad day survivable: it notices the
