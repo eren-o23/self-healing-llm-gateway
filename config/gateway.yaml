@@ -68,3 +68,14 @@ breaker:
   cooldown_max_s: 120
   probe_ratio: 0.1
   probe_successes_required: 2
+
+# Deferrable work: how often it is retried and how long results are kept.
+# Delays are full-jittered - uniform over [0, min(base * 2**attempt, max)] - so a
+# provider that just recovered is not stampeded by the whole backlog at once.
+queue:
+  max_attempts: 5
+  base_delay_s: 1
+  max_delay_s: 60
+  poll_interval_s: 1
+  job_ttl_s: 86400
+  idempotency_ttl_s: 86400

@@ -56,6 +56,17 @@ TEST_CONFIG = {
         "probe_ratio": 0.1,
         "probe_successes_required": 2,
     },
+    # Delays small enough that a test can advance past them with an injected
+    # clock rather than sleeping, and max_attempts low enough that reaching the
+    # DLQ is three lines rather than five.
+    "queue": {
+        "max_attempts": 3,
+        "base_delay_s": 0.01,
+        "max_delay_s": 0.04,
+        "poll_interval_s": 0.01,
+        "job_ttl_s": 60,
+        "idempotency_ttl_s": 60,
+    },
 }
 
 

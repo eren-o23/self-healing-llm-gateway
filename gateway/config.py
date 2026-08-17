@@ -87,12 +87,30 @@ class BreakerConfig(BaseModel):
     probe_successes_required: int = 2
 
 
+class QueueConfig(BaseModel):
+    """The delay queue's retry schedule, and how long finished work is kept.
+
+    `base_delay_s` and `max_delay_s` bound a full-jitter backoff, so the delay
+    for attempt n is uniform over [0, min(base * 2**n, cap)]. Shortening them
+    makes a drain visible inside a 90-second recording; lengthening them is what
+    a real deployment would do.
+    """
+
+    max_attempts: int = 5
+    base_delay_s: float = 1.0
+    max_delay_s: float = 60.0
+    poll_interval_s: float = 1.0
+    job_ttl_s: int = 86_400
+    idempotency_ttl_s: int = 86_400
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig]
     classes: dict[str, ClassConfig]
     default_class: str
     health: HealthConfig = HealthConfig()
     breaker: BreakerConfig = BreakerConfig()
+    queue: QueueConfig = QueueConfig()
 
     @model_validator(mode="after")
     def _check_references(self) -> GatewayConfig:

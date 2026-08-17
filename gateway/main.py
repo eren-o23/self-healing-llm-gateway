@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -16,7 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from gateway import breaker, chaos, health, router
+from gateway import breaker, chaos, health, idempotency, router
 from gateway.config import GatewayConfig, get_config, get_redis
 from gateway.providers import Outcome, ProviderCallLog, ProviderResult
 from gateway.schemas import (
@@ -215,13 +216,77 @@ async def chat_completions(
     meta: Annotated[RequestMetadata, Depends(require_metadata)],
     config: Annotated[GatewayConfig, Depends(get_config)],
     r: Annotated[Redis, Depends(get_redis)],
+    idempotency_key: Annotated[str | None, Header()] = None,
     provider: Annotated[
         str | None, Query(description="Pin a provider, bypassing the ladder")
     ] = None,
-):
+) -> Response:
     if request.stream:
         raise HTTPException(status_code=400, detail="streaming is not supported")
 
+    if idempotency_key:
+        stored = await idempotency.claim(
+            r, meta.tenant, idempotency_key, ttl_s=config.queue.idempotency_ttl_s
+        )
+        if stored is not None:
+            return _replay(stored)
+
+    try:
+        status, body = await _serve(request, meta, config, r, provider)
+    except BaseException:
+        # Including HTTPException from _resolve_ladder. A claim left behind by a
+        # request that never produced a response answers every retry with 409,
+        # which is a worse outage than the one that caused it.
+        if idempotency_key:
+            await idempotency.release(r, meta.tenant, idempotency_key)
+        raise
+
+    if idempotency_key:
+        if status < 400:
+            await idempotency.store(
+                r,
+                meta.tenant,
+                idempotency_key,
+                status,
+                body,
+                ttl_s=config.queue.idempotency_ttl_s,
+            )
+        else:
+            await idempotency.release(r, meta.tenant, idempotency_key)
+
+    return JSONResponse(status_code=status, content=body)
+
+
+def _replay(stored: str) -> JSONResponse:
+    """Hand back what this key already produced, without touching a provider."""
+    if stored == idempotency.IN_FLIGHT:
+        raise HTTPException(
+            status_code=409,
+            detail="a request with this Idempotency-Key is already in flight",
+        )
+    envelope = json.loads(stored)
+    return JSONResponse(
+        status_code=envelope["status"],
+        content=envelope["body"],
+        # So a replay is visible in a trace rather than being inferred from a
+        # provider counter that did not move.
+        headers={"X-Idempotent-Replay": "true"},
+    )
+
+
+async def _serve(
+    request: ChatCompletionRequest,
+    meta: RequestMetadata,
+    config: GatewayConfig,
+    r: Redis,
+    provider: str | None,
+) -> tuple[int, dict[str, Any]]:
+    """The request itself, as a status and a body.
+
+    Split out from the handler so the idempotency guard has one place to store or
+    release, rather than one at each of three returns - which is the shape that
+    eventually grows a fourth return nobody remembers to wire up.
+    """
     ladder = _resolve_ladder(config, meta.request_class, provider)
     payload = request.to_provider_kwargs()
 
@@ -229,10 +294,7 @@ async def chat_completions(
     attempts = [asdict(a) for a in routed.attempts]
 
     if routed.result is None:
-        return JSONResponse(
-            status_code=_exhausted_status(routed),
-            content=_exhausted(meta, attempts, routed.last_failure),
-        )
+        return _exhausted_status(routed), _exhausted(meta, attempts, routed.last_failure)
 
     result = routed.result
     log.info(
@@ -250,23 +312,20 @@ async def chat_completions(
     )
 
     if not result.outcome.ok:
-        return JSONResponse(
-            status_code=_STATUS_BY_OUTCOME[result.outcome],
-            content={
-                "error": {
-                    "message": result.error or str(result.outcome),
-                    "type": str(result.outcome),
-                    "provider": result.provider,
-                },
-                "x_gateway": {
-                    "request_id": meta.request_id,
-                    "request_class": meta.request_class,
-                    "attempts": attempts,
-                },
+        return _STATUS_BY_OUTCOME[result.outcome], {
+            "error": {
+                "message": result.error or str(result.outcome),
+                "type": str(result.outcome),
+                "provider": result.provider,
             },
-        )
+            "x_gateway": {
+                "request_id": meta.request_id,
+                "request_class": meta.request_class,
+                "attempts": attempts,
+            },
+        }
 
-    return _to_openai_response(result, meta, routed.attempts)
+    return 200, _to_openai_response(result, meta, routed.attempts).model_dump(mode="json")
 
 
 def _exhausted_status(routed: router.RouteOutcome) -> int:
