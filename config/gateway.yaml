@@ -70,7 +70,14 @@ breaker:
   min_samples: 8            # counted over health_samples, so bad input cannot reach it
   cooldown_s: 20
   cooldown_max_s: 120
-  probe_ratio: 0.1
+  # Share of requests admitted to a half-open circuit. At 0.1 recovery needed
+  # roughly ten requests per probe - measured live, the two probes landed at
+  # requests 15 and 24 of 25, so the circuit spent most of its recovery closed to
+  # traffic it could have served. Half is the honest read of what half-open is
+  # for: the cooldown has already expired, so the question is no longer "is it
+  # safe to try" but "how fast do we find out". probe_successes_required: 2 is
+  # what bounds the damage if the answer is no.
+  probe_ratio: 0.5
   probe_successes_required: 2
 
 # Deferrable work: how often it is retried and how long results are kept.
