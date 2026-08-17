@@ -26,7 +26,7 @@ _ARGS = {"message": "boom", "llm_provider": "openai", "model": "gpt-4o-mini"}
         (llm_exc.PermissionDeniedError(**_ARGS, response=_RESPONSE), Outcome.AUTH),
         (llm_exc.ContentPolicyViolationError(**_ARGS), Outcome.CONTENT_FILTER),
         (llm_exc.ContextWindowExceededError(**_ARGS), Outcome.BAD_REQUEST),
-        (llm_exc.NotFoundError(**_ARGS), Outcome.BAD_REQUEST),
+        (llm_exc.NotFoundError(**_ARGS), Outcome.MODEL_NOT_FOUND),
         (llm_exc.BadRequestError(**_ARGS), Outcome.BAD_REQUEST),
         (llm_exc.ServiceUnavailableError(**_ARGS), Outcome.SERVER_ERROR),
         (llm_exc.InternalServerError(**_ARGS), Outcome.SERVER_ERROR),
@@ -62,6 +62,21 @@ def test_caller_faults_never_trip_a_breaker():
     assert Outcome.TIMEOUT.trippable
     assert Outcome.SERVER_ERROR.trippable
     assert Outcome.AUTH.trippable
+
+
+def test_a_stale_model_name_is_the_gateways_fault_not_the_callers():
+    """Regression: NotFoundError used to classify as BAD_REQUEST.
+
+    Groq decommissioned a configured model mid-project. Read as the caller's
+    fault it was non-trippable, so the ladder treated it as final and stopped at
+    that rung instead of failing over, the circuit stayed closed over a provider
+    that could not serve a single request, and queued work died terminally.
+
+    Grouped with AUTH instead: both are the gateway holding stale configuration,
+    and both make that provider useless to everyone until it is fixed.
+    """
+    assert Outcome.MODEL_NOT_FOUND.trippable
+    assert classify_exception(llm_exc.NotFoundError(**_ARGS)) is Outcome.MODEL_NOT_FOUND
 
 
 def _usage_response(model: str, prompt: int = 1000, completion: int = 1000):

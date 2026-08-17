@@ -109,6 +109,52 @@ def test_a_caller_fault_stops_the_walk_dead(client, stub_ladder, outcome):
     assert calls == ["anthropic"], "the caller's bad input must not cost four calls"
 
 
+def test_a_stale_model_name_does_fail_over(client, stub_ladder):
+    """The counterpart to the test above, and the line between them.
+
+    Both are 4xx from the provider, so the naive reading puts them together - and
+    that is exactly the bug this fixes. A model that has been decommissioned is
+    the gateway's own configuration gone stale: the next rung has a different
+    model and will serve the request perfectly well, so stopping the walk here
+    turns one bad config line into a total outage for that class.
+    """
+    calls = stub_ladder(
+        {"anthropic": failed_result("anthropic", Outcome.MODEL_NOT_FOUND)}
+    )
+
+    response = client.post("/v1/chat/completions", json=BODY, headers=CHAT)
+
+    assert response.status_code == 200
+    assert calls == ["anthropic", "openai"]
+    assert response.json()["x_gateway"]["provider"] == "openai"
+
+
+def test_a_ladder_of_stale_models_is_a_502_not_a_400(client, stub_ladder):
+    """Nobody sent anything wrong, so the caller must not be told they did."""
+    stub_ladder(
+        {p: failed_result(p, Outcome.MODEL_NOT_FOUND) for p in
+         ("anthropic", "openai", "groq", "ollama")}
+    )
+
+    response = client.post("/v1/chat/completions", json=BODY, headers=CHAT)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "model_not_found"
+
+
+def test_every_failure_outcome_has_a_status(client):
+    """_serve and _exhausted_status index _STATUS_BY_OUTCOME directly.
+
+    A new Outcome without an entry does not fail loudly at import - it raises a
+    KeyError on the first request that hits it, turning the one response that
+    would have named the misconfiguration into an unexplained 500.
+    """
+    from gateway.main import _STATUS_BY_OUTCOME
+
+    missing = {o for o in Outcome if not o.ok} - set(_STATUS_BY_OUTCOME)
+    assert not missing, f"no client status for {sorted(missing)}"
+
+
 # --- open circuits are skipped ------------------------------------------------
 
 

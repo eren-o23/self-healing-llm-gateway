@@ -31,6 +31,11 @@ class Outcome(StrEnum):
     CONTENT_FILTER and BAD_REQUEST are the caller's fault: letting them open a
     breaker would take a healthy provider offline because somebody sent bad
     input. That distinction is the most commonly botched part of a gateway.
+
+    AUTH and MODEL_NOT_FOUND sit on the other side of that line despite also
+    being 4xx from the provider: a rejected key or a decommissioned model is the
+    *gateway's* misconfiguration, and that provider is unusable for every caller
+    until somebody fixes it. Trippable, and 502 rather than 400.
     """
 
     OK = "ok"
@@ -39,6 +44,7 @@ class Outcome(StrEnum):
     SERVER_ERROR = "server_error"
     CONTENT_FILTER = "content_filter"
     AUTH = "auth"
+    MODEL_NOT_FOUND = "model_not_found"
     BAD_REQUEST = "bad_request"
 
     @property
@@ -51,7 +57,13 @@ class Outcome(StrEnum):
 
 
 _TRIPPABLE = frozenset(
-    {Outcome.RATE_LIMIT, Outcome.TIMEOUT, Outcome.SERVER_ERROR, Outcome.AUTH}
+    {
+        Outcome.RATE_LIMIT,
+        Outcome.TIMEOUT,
+        Outcome.SERVER_ERROR,
+        Outcome.AUTH,
+        Outcome.MODEL_NOT_FOUND,
+    }
 )
 
 # Order matters: the first matching entry wins, so subclasses precede their bases.
@@ -65,7 +77,12 @@ _EXCEPTION_TAXONOMY: tuple[tuple[type[Exception], Outcome], ...] = (
     (llm_exc.PermissionDeniedError, Outcome.AUTH),
     (llm_exc.ContentPolicyViolationError, Outcome.CONTENT_FILTER),
     (llm_exc.ContextWindowExceededError, Outcome.BAD_REQUEST),
-    (llm_exc.NotFoundError, Outcome.BAD_REQUEST),
+    # A model the provider has never heard of is a line in config/gateway.yaml
+    # that has gone stale, not something the caller sent. Groq decommissioned
+    # llama-3.3-70b-versatile mid-project and this row - then BAD_REQUEST - meant
+    # the ladder stopped dead at that rung, the circuit never opened, and queued
+    # jobs failed terminally. Classified as the gateway's fault, it fails over.
+    (llm_exc.NotFoundError, Outcome.MODEL_NOT_FOUND),
     (llm_exc.UnprocessableEntityError, Outcome.BAD_REQUEST),
     (llm_exc.BadRequestError, Outcome.BAD_REQUEST),
     (llm_exc.ServiceUnavailableError, Outcome.SERVER_ERROR),

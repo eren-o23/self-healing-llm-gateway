@@ -27,13 +27,19 @@ from gateway.schemas import (
 
 log = logging.getLogger(__name__)
 
-# How a provider outcome surfaces to the caller. AUTH is a 502 on purpose: a
-# missing or rejected provider key is the gateway's problem, not the caller's.
+# How a provider outcome surfaces to the caller. AUTH and MODEL_NOT_FOUND are
+# 502s on purpose: a rejected key or a model that has been decommissioned out
+# from under the config is the gateway's problem, not the caller's.
+#
+# Every non-OK Outcome needs an entry. _serve and _exhausted_status both index
+# this directly, so a missing member is a KeyError and a 500 on the one request
+# that would have explained the misconfiguration - hence the test below it.
 _STATUS_BY_OUTCOME: dict[Outcome, int] = {
     Outcome.RATE_LIMIT: 429,
     Outcome.TIMEOUT: 504,
     Outcome.SERVER_ERROR: 502,
     Outcome.AUTH: 502,
+    Outcome.MODEL_NOT_FOUND: 502,
     Outcome.CONTENT_FILTER: 400,
     Outcome.BAD_REQUEST: 400,
 }
