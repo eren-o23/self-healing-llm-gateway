@@ -52,12 +52,18 @@ services:
       - "3000:3000"
     volumes:
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      # The board itself, read straight from the repo. Editing it in the UI is
+      # disabled in the provider config, so this file stays the source of truth.
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     environment:
-      # Straight onto the board for the phase 5 recording, no login screen.
+      # Straight onto the board, no login screen and no navigating to find it.
+      # "docker compose up gives a working dashboard" is an acceptance criterion,
+      # and landing on an empty home page does not meet it.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/gateway.json
     depends_on:
       - prometheus
 

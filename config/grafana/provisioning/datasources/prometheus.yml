@@ -1,5 +1,5 @@
 # Provisioned in git so `docker compose up` yields a working datasource with no
-# clicking. The dashboard itself lands in phase 5, once the metrics it reads are real.
+# clicking. The dashboard beside it is provisioned the same way.
 apiVersion: 1
 
 datasources:
@@ -9,3 +9,7 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    # Pinned rather than generated, because every panel in gateway.json refers to
+    # it by uid. Left to Grafana, the uid differs per volume and the whole board
+    # comes up "Datasource not found".
+    uid: prometheus

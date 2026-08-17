@@ -1,0 +1,13 @@
+# The board ships in git and is loaded from disk at startup, so `docker compose
+# up` is the whole setup. Nothing here is clicked, imported or saved by hand.
+apiVersion: 1
+
+providers:
+  - name: gateway
+    type: file
+    # Read-only: the file on disk is the source of truth. Editing in the UI and
+    # forgetting to export it back is how a provisioned dashboard quietly stops
+    # matching the one in the repo.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
