@@ -6,11 +6,13 @@ run_once() exists precisely so these tests do not have to start and stop a
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fakeredis.aioredis import FakeRedis
 from prometheus_client import REGISTRY
 
-from gateway import queue, worker
+from gateway import breaker, queue, worker
 from gateway.providers import Outcome
 from gateway.queue import Status
 from gateway.schemas import RequestMetadata
@@ -174,3 +176,54 @@ async def test_the_queue_collectors_move(redis, config, stub_ladder):
     assert _value("gateway_dlq_total") == before_dlq + 1
     assert _value("gateway_job_age_seconds_count", status="dead") == before_dead + 1
     assert _value("gateway_queue_depth") == 0.0
+
+
+async def test_an_open_circuit_does_not_spend_an_attempt(redis, config, stub_ladder):
+    """Nothing was tried, so nothing was learned - and nothing should be spent.
+
+    A breaker cooldown outlives a whole retry budget. Counting these dead-letters
+    every job without a single provider call, during exactly the outage the queue
+    exists to survive.
+    """
+    calls = stub_ladder({})
+    job_id = await queue.enqueue(redis, meta(), PAYLOAD)
+    # Opened against the real clock, because run_once() reads it - a fixed NOW
+    # would sit a cooldown in the past and admit a probe on the first tick.
+    now_ms = int(time.time() * 1000)
+    for name in ("anthropic", "openai", "groq", "ollama"):
+        await breaker._open(redis, name, now_ms, 3600.0, "test")
+
+    for _ in range(10):
+        await redis.zadd(queue.READY, {job_id: 0})
+        await worker.run_once(redis, config)
+
+    job = await queue.get(redis, job_id)
+    assert job.status is Status.QUEUED
+    assert job.attempts == 0
+    assert calls == []
+    assert await queue.dead(redis) == []
+
+
+async def test_the_capacity_re_check_ignores_the_attempt_count(
+    redis, config, stub_ladder, monkeypatch
+):
+    """Attempts count past provider failures, not how soon a circuit reopens.
+
+    Scaling the re-check by them left a job that had failed six times waiting up
+    to a minute after capacity was already back.
+    """
+    stub_ladder({})
+    delays: list[int] = []
+    monkeypatch.setattr(
+        queue, "retry_delay_s", lambda attempt, base, cap: delays.append(attempt) or 0.0
+    )
+
+    job_id = await queue.enqueue(redis, meta(), PAYLOAD)
+    await redis.hset(f"job:{job_id}", "attempts", "6")
+    now_ms = int(time.time() * 1000)
+    for name in ("anthropic", "openai", "groq", "ollama"):
+        await breaker._open(redis, name, now_ms, 3600.0, "test")
+
+    await worker.run_once(redis, config)
+
+    assert delays == [0]

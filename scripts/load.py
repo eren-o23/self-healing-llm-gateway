@@ -48,6 +48,9 @@ def call(base: str, request_class: str, request_id: str, timeout: float):
 
 def describe(status: int, body: dict) -> str:
     """Served-by plus the full trail, which is what makes a failover legible."""
+    if "job_id" in body:  # a deferrable class was accepted rather than attempted
+        return f"{status}  {'queued':<10}  [{body['job_id'][:8]}]"
+
     gateway = body.get("x_gateway", {})
     trail = " -> ".join(
         f"{a['provider']}:{a['outcome']}" for a in gateway.get("attempts", [])

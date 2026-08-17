@@ -173,9 +173,20 @@ async def pop_due(r: Redis, *, now_ms: int | None = None) -> Job | None:
 
 
 async def retry(
-    r: Redis, job: Job, delay_s: float, error: str, *, now_ms: int | None = None
+    r: Redis,
+    job: Job,
+    delay_s: float,
+    error: str,
+    *,
+    count: bool = True,
+    now_ms: int | None = None,
 ) -> int:
-    """Put the job back with a later score. Returns when it becomes due."""
+    """Put the job back with a later score. Returns when it becomes due.
+
+    `count=False` reschedules without spending an attempt, for the case where
+    nothing was actually tried. See worker._defer for why that distinction has
+    to exist.
+    """
     now_ms = _now_ms() if now_ms is None else now_ms
     ready_at_ms = now_ms + int(delay_s * 1000)
     await _update(
@@ -183,7 +194,7 @@ async def retry(
         job.id,
         now_ms=now_ms,
         status=Status.QUEUED,
-        attempts=job.attempts + 1,
+        attempts=job.attempts + 1 if count else job.attempts,
         error=error,
     )
     await r.zadd(READY, {job.id: ready_at_ms})

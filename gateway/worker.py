@@ -28,7 +28,6 @@ from redis.asyncio import Redis
 
 from gateway import metrics, queue, router
 from gateway.config import GatewayConfig, get_config, get_redis
-from gateway.providers import ProviderCallLog
 from gateway.queue import Job, Status
 from gateway.schemas import to_openai_response
 
@@ -88,7 +87,46 @@ async def _run(r: Redis, config: GatewayConfig, job: Job) -> None:
         return
 
     last = routed.last_failure
-    await _retry_or_bury(r, config, job, _reason(last))
+    if last is None:
+        await _defer(r, config, job)
+        return
+
+    await _retry_or_bury(r, config, job, f"{last.outcome}: {last.error}")
+
+
+async def _defer(r: Redis, config: GatewayConfig, job: Job) -> None:
+    """Every circuit was open, so nothing was attempted and nothing was learned.
+
+    Spending an attempt here is the bug live verification found: a 20s breaker
+    cooldown outlives a five-attempt budget, so every job dead-lettered without
+    a single provider call ever being made - the queue giving up during exactly
+    the outage it exists to survive.
+
+    `RouteOutcome.last_failure` is the same signal that tells the API a 503
+    apart from a real status: nothing ran, as opposed to something ran and
+    failed. Here it decides whether the attempt counted.
+
+    Unbounded by design - work waits as long as there is no capacity. The floor
+    is the job hash's TTL: once it expires, pop_due finds nothing behind the id
+    and the index entry goes with it.
+
+    The re-check interval deliberately ignores job.attempts. That count measures
+    past provider failures and says nothing about how soon a circuit reopens;
+    scaling by it made a job that had already failed six times wait up to a
+    minute between checks, so it sat idle long after capacity came back. Seen
+    live: 19s and 49s deferrals against a half-open circuit. A flat, jittered
+    poll is what this actually wants.
+
+    # ponytail: re-checks roughly every base_delay_s while circuits are open; if
+    # that ever gets chatty, back off on a separate deferral count
+    """
+    delay_s = queue.retry_delay_s(
+        0, config.queue.base_delay_s, config.queue.max_delay_s
+    )
+    await queue.retry(r, job, delay_s, "waiting for capacity", count=False)
+    log.info(
+        "job %s deferred: every circuit open, re-checking in %.2fs", job.id, delay_s
+    )
 
 
 async def _retry_or_bury(
@@ -121,11 +159,6 @@ async def _finish(r: Redis, job: Job, status: Status, reason: str) -> None:
     await queue.fail(r, job, reason)
     _observe_age(job, status)
     log.warning("job %s failed permanently: %s", job.id, reason)
-
-
-def _reason(last: ProviderCallLog | None) -> str:
-    """Why this attempt failed. None means every circuit was open."""
-    return f"{last.outcome}: {last.error}" if last else "no provider available"
 
 
 def _observe_age(job: Job, status: Status) -> None:
