@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from fakeredis.aioredis import FakeRedis
+from prometheus_client import REGISTRY
 
 from gateway import queue, worker
 from gateway.providers import Outcome
@@ -18,6 +19,10 @@ from tests.conftest import failed_result, ok_result
 pytestmark = pytest.mark.usefixtures("use_test_config", "all_keys_set")
 
 PAYLOAD = {"messages": [{"role": "user", "content": "hello"}]}
+
+
+def _value(name: str, **labels) -> float:
+    return REGISTRY.get_sample_value(name, labels) or 0.0
 
 
 @pytest.fixture
@@ -151,3 +156,21 @@ async def test_a_job_that_recovers_completes_on_a_later_attempt(
     await worker.run_once(redis, config)
 
     assert (await queue.get(redis, job_id)).status is Status.DONE
+
+
+async def test_the_queue_collectors_move(redis, config, stub_ladder):
+    """Deltas, not absolutes: prometheus_client's registry is a process global."""
+    stub_ladder(all_broken())
+    before_retries = _value("gateway_queue_retries_total", attempt="1")
+    before_dlq = _value("gateway_dlq_total")
+    before_dead = _value("gateway_job_age_seconds_count", status="dead")
+
+    job_id = await queue.enqueue(redis, meta(), PAYLOAD)
+    for _ in range(3):
+        await redis.zadd(queue.READY, {job_id: 0})
+        await worker.run_once(redis, config)
+
+    assert _value("gateway_queue_retries_total", attempt="1") == before_retries + 1
+    assert _value("gateway_dlq_total") == before_dlq + 1
+    assert _value("gateway_job_age_seconds_count", status="dead") == before_dead + 1
+    assert _value("gateway_queue_depth") == 0.0
